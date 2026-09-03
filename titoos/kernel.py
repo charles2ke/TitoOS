@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
 from typing import Callable, Iterator
 
-from .agent import Agent, AgentState, Context, FunctionAgent
+from .agent import Agent, AgentState, Context, FunctionAgent, RestartPolicy
+from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBackend
 from .bus import MessageBus
 from .message import Message
+from .persistence import AgentFactory, AgentRecord, FinishedAgent, Snapshot
+
+
+#: Payload of the message a supervisor receives when a child fails for good.
+CHILD_FAILED = "titoos.child_failed"
+
+_FINISHED = (AgentState.DONE, AgentState.FAILED)
 
 
 class StopReason(str, Enum):
@@ -36,6 +44,8 @@ class TickReport:
     failed: tuple[str, ...]
     #: Live agents skipped this tick because they were waiting for a message.
     waiting: tuple[str, ...] = ()
+    #: Agents restarted by their supervisor after failing this tick.
+    restarted: tuple[str, ...] = ()
 
 
 class Kernel:
@@ -59,17 +69,23 @@ class Kernel:
             kernel.run()
     """
 
-    def __init__(self, max_workers: int = 1) -> None:
+    def __init__(
+        self,
+        max_workers: int = 1,
+        backend: ExecutionBackend | None = None,
+    ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
+        if backend is None:
+            backend = SerialBackend() if max_workers == 1 else ThreadBackend(max_workers)
         self.bus = MessageBus()
         self.max_workers = max_workers
+        self.backend = backend
         self._agents: dict[str, Agent] = {}
         self._tick = 0
         self.errors: list[tuple[str, BaseException]] = []
         self.stop_reason: StopReason | None = None
         self._lock = threading.RLock()
-        self._pool: ThreadPoolExecutor | None = None
 
     @property
     def tick(self) -> int:
@@ -84,18 +100,26 @@ class Kernel:
         with self._lock:
             return self._agents[name]
 
-    def register(self, agent: Agent) -> Agent:
+    def register(self, agent: Agent, parent: str | None = None) -> Agent:
         """Add ``agent`` to the kernel. Names must be unique.
 
         Safe to call from a worker thread, e.g. via :meth:`Context.spawn`.
         Agents registered during a tick start running on the next one.
+        ``parent`` links the agent to its supervisor.
         """
         with self._lock:
             if agent.name in self._agents:
                 raise ValueError(f"agent already registered: {agent.name!r}")
+            if parent is not None:
+                agent.parent = parent
             self._agents[agent.name] = agent
             self.bus.register(agent.name)
         return agent
+
+    def children_of(self, name: str) -> tuple[Agent, ...]:
+        """Every registered agent spawned by ``name``."""
+        with self._lock:
+            return tuple(a for a in self._agents.values() if a.parent == name)
 
     def spawn(self, name: str, fn: Callable[[Context], None]) -> Agent:
         """Register a callable ``fn(ctx)`` as an agent named ``name``."""
@@ -105,6 +129,40 @@ class Kernel:
         with self._lock:
             self._agents.pop(name, None)
         self.bus.unregister(name)
+
+    def _supervise(self, agent: Agent) -> bool:
+        """Apply ``agent``'s restart policy after a failure.
+
+        Returns ``True`` if the agent was restarted. Runs at the tick barrier
+        rather than inside a worker so the decision, the restart counter and
+        any escalation message are all deterministic.
+        """
+        if agent.restart_policy is not RestartPolicy.ON_FAILURE:
+            self._escalate(agent)
+            return False
+        if agent.restarts >= agent.max_restarts:
+            self._escalate(agent)
+            return False
+        agent.restarts += 1
+        agent.on_restart()
+        agent.state = AgentState.READY
+        return True
+
+    def _escalate(self, agent: Agent) -> None:
+        """Tell ``agent``'s parent that it failed for good, if it has one."""
+        if agent.parent is None:
+            return
+        with self._lock:
+            parent = self._agents.get(agent.parent)
+        if parent is None or not parent.is_alive:
+            return
+        self.bus.post(
+            agent.name,
+            agent.parent,
+            CHILD_FAILED,
+            child=agent.name,
+            restarts=agent.restarts,
+        )
 
     def _unregister_finished_mailbox(self, agent: Agent) -> None:
         if agent.state in (AgentState.DONE, AgentState.FAILED):
@@ -137,21 +195,30 @@ class Kernel:
         try:
             agent.step(ctx)
         except Exception as exc:  # noqa: BLE001 - a failing agent must not kill the OS
-            agent.state = AgentState.FAILED
-            with self._lock:
-                self.errors.append((agent.name, exc))
-            return False
+            return self._record_failure(agent, exc)
         if agent.state is AgentState.RUNNING:
             agent.state = AgentState.READY
         return True
 
-    def _executor(self) -> ThreadPoolExecutor:
+    async def _run_agent_async(self, agent: Agent, tick: int, inbox: list[Message]) -> bool:
+        """Await one tick of ``agent``, which may define a sync or async step."""
+        ctx = Context(kernel=self, agent=agent, tick=tick, inbox=inbox)
+        agent.state = AgentState.RUNNING
+        try:
+            result = agent.step(ctx)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001 - a failing agent must not kill the OS
+            return self._record_failure(agent, exc)
+        if agent.state is AgentState.RUNNING:
+            agent.state = AgentState.READY
+        return True
+
+    def _record_failure(self, agent: Agent, exc: BaseException) -> bool:
+        agent.state = AgentState.FAILED
         with self._lock:
-            if self._pool is None:
-                self._pool = ThreadPoolExecutor(
-                    max_workers=self.max_workers, thread_name_prefix="titoos"
-                )
-            return self._pool
+            self.errors.append((agent.name, exc))
+        return False
 
     def step(self) -> TickReport:
         """Run one scheduling tick and return what happened.
@@ -181,27 +248,32 @@ class Kernel:
             scheduled.append(agent)
             inboxes.append(inbox)
 
-        if self.max_workers == 1 or len(scheduled) < 2:
-            outcomes = [
-                self._run_agent(agent, tick, inbox)
-                for agent, inbox in zip(scheduled, inboxes)
-            ]
-        else:
-            futures = [
-                self._executor().submit(self._run_agent, agent, tick, inbox)
-                for agent, inbox in zip(scheduled, inboxes)
-            ]
-            outcomes = [future.result() for future in futures]
+        outcomes = self.backend.run_tick(self, scheduled, inboxes, tick)
+
+        # Supervision runs at the barrier, in registration order, so restarts
+        # and escalation messages do not depend on worker timing.
+        restarted = tuple(
+            agent.name
+            for agent, ok in zip(scheduled, outcomes)
+            if not ok and self._supervise(agent)
+        )
 
         # Reclaim mailboxes only once the whole tick is over: dropping them
         # mid-tick would make sending to an agent that finished concurrently
-        # fail or not depending on thread timing.
+        # fail or not depending on thread timing. Restarted agents are alive
+        # again by now, so they keep theirs.
         for agent in scheduled:
             self._unregister_finished_mailbox(agent)
 
         ran = tuple(a.name for a, ok in zip(scheduled, outcomes) if ok)
         failed = tuple(a.name for a, ok in zip(scheduled, outcomes) if not ok)
-        return TickReport(tick=tick, ran=ran, failed=failed, waiting=tuple(waiting))
+        return TickReport(
+            tick=tick,
+            ran=ran,
+            failed=failed,
+            waiting=tuple(waiting),
+            restarted=restarted,
+        )
 
     def run(self, max_ticks: int = 100) -> list[TickReport]:
         """Run until the agents finish, go quiescent, or ``max_ticks`` is hit.
@@ -227,12 +299,106 @@ class Kernel:
                 self.stop_reason = StopReason.QUIESCENT
         return reports
 
-    def shutdown(self, wait: bool = True) -> None:
-        """Release the worker pool, if one was created."""
+    def snapshot(self) -> Snapshot:
+        """Capture the kernel as of the current tick boundary.
+
+        Must be called between ticks — never from inside an agent's
+        ``step()``, where agents are mid-execution and the picture would be
+        inconsistent.
+        """
         with self._lock:
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=wait)
+            running = [a.name for a in self._agents.values() if a.state is AgentState.RUNNING]
+            if running:
+                raise RuntimeError(
+                    "cannot snapshot while agents are running: "
+                    f"{', '.join(sorted(running))}"
+                )
+            records = tuple(
+                AgentRecord(
+                    name=agent.name,
+                    # Placeholders keep reporting the kind they stood in for,
+                    # so snapshots stay stable across repeated save/restore.
+                    kind=(
+                        agent.kind
+                        if isinstance(agent, FinishedAgent)
+                        else type(agent).__name__
+                    ),
+                    state=agent.state.value,
+                    parent=agent.parent,
+                    restarts=agent.restarts,
+                    data=agent.save_state(),
+                )
+                for agent in self._agents.values()
+            )
+            mailboxes = {
+                name: tuple(messages)
+                for name, messages in self.bus.dump().items()
+                if messages
+            }
+            return Snapshot(tick=self._tick, agents=records, mailboxes=mailboxes)
+
+    @classmethod
+    def restore(
+        cls,
+        snapshot: Snapshot,
+        factories: dict[str, AgentFactory],
+        max_workers: int = 1,
+        backend: "ExecutionBackend | None" = None,
+    ) -> "Kernel":
+        """Rebuild a kernel from ``snapshot``.
+
+        ``factories`` maps the ``kind`` recorded for each agent (its class
+        name) to a callable building a bare agent of that kind for a given
+        name. Behaviour cannot be serialized, so supplying it is the caller's
+        job. A factory is required for every agent that is still alive; a
+        missing one is an error rather than a silently dropped agent. Agents
+        that had already finished are restored as
+        :class:`~titoos.persistence.FinishedAgent` placeholders when no
+        factory is given, since they can never run again.
+        """
+        live_kinds = {
+            r.kind for r in snapshot.agents if AgentState(r.state) not in _FINISHED
+        }
+        missing = sorted(live_kinds - set(factories))
+        if missing:
+            raise KeyError(f"no factory for agent kind(s): {', '.join(missing)}")
+
+        kernel = cls(max_workers=max_workers, backend=backend)
+        kernel._tick = snapshot.tick
+        for record in snapshot.agents:
+            factory = factories.get(record.kind)
+            if factory is None:
+                agent: Agent = FinishedAgent(record.name, kind=record.kind)
+            else:
+                agent = factory(record.name)
+            if agent.name != record.name:
+                raise ValueError(
+                    f"factory for {record.kind!r} built agent named "
+                    f"{agent.name!r}, expected {record.name!r}"
+                )
+            agent.parent = record.parent
+            agent.restarts = record.restarts
+            agent.load_state(dict(record.data))
+            kernel.register(agent)
+            # Set the lifecycle state after registration so a restored WAITING
+            # agent is not scheduled until a message actually arrives.
+            agent.state = AgentState(record.state)
+        kernel.bus.load(
+            {name: list(messages) for name, messages in snapshot.mailboxes.items()}
+        )
+        # Mailbox load replaces the registry wholesale, so re-add empty
+        # mailboxes for live agents that had no pending messages. Finished
+        # agents stay without one, exactly as when they were reclaimed.
+        for agent in kernel.agents:
+            if agent.is_alive:
+                kernel.bus.register(agent.name)
+            elif not kernel.bus.pending(agent.name):
+                kernel.bus.unregister(agent.name)
+        return kernel
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Release any resources held by the execution backend."""
+        self.backend.shutdown(wait=wait)
 
     def __enter__(self) -> "Kernel":
         return self

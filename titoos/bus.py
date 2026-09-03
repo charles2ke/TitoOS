@@ -68,6 +68,18 @@ class MessageBus:
         with self._lock:
             return tuple(self._mailboxes)
 
+    def dump(self) -> dict[str, list[Message]]:
+        """A copy of every mailbox, without consuming anything."""
+        with self._lock:
+            return {name: list(box) for name, box in self._mailboxes.items()}
+
+    def load(self, mailboxes: dict[str, list[Message]]) -> None:
+        """Replace all mailboxes with ``mailboxes``."""
+        with self._lock:
+            self._mailboxes.clear()
+            for name, messages in mailboxes.items():
+                self._mailboxes[name] = deque(messages)
+
     def has_traffic(self) -> bool:
         with self._lock:
             return any(self._mailboxes.values())

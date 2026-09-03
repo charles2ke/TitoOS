@@ -28,3 +28,21 @@ class Message:
     @property
     def is_broadcast(self) -> bool:
         return self.to == BROADCAST
+
+    def to_dict(self) -> dict[str, Any]:
+        """A plain, JSON-friendly representation of this message."""
+        return {
+            "sender": self.sender,
+            "to": self.to,
+            "payload": self.payload,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Message":
+        return cls(
+            sender=data["sender"],
+            to=data["to"],
+            payload=data.get("payload"),
+            metadata=data.get("metadata") or {},
+        )

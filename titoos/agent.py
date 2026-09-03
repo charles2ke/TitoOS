@@ -12,6 +12,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .kernel import Kernel
 
 
+class RestartPolicy(str, Enum):
+    """What the kernel does when an agent raises out of :meth:`Agent.step`."""
+
+    #: Leave the agent FAILED. The default, and the historical behaviour.
+    NEVER = "never"
+    #: Reset the agent to READY and run it again, up to ``max_restarts``.
+    ON_FAILURE = "on_failure"
+
+
 class AgentState(str, Enum):
     """Lifecycle state of an agent inside the kernel."""
 
@@ -38,7 +47,16 @@ class Context:
         return self.kernel.bus.broadcast(self.agent.name, payload, **metadata)
 
     def spawn(self, agent: "Agent") -> "Agent":
-        return self.kernel.register(agent)
+        """Register ``agent`` as a child of the running agent.
+
+        The child is supervised by its parent: if it fails and exhausts its
+        restarts, the parent is notified (see :meth:`Kernel.register`).
+        """
+        return self.kernel.register(agent, parent=self.agent.name)
+
+    def children(self) -> tuple["Agent", ...]:
+        """The agents spawned by the running agent that still exist."""
+        return self.kernel.children_of(self.agent.name)
 
     def wait(self) -> None:
         """Block the agent until a message arrives.
@@ -57,11 +75,28 @@ class Context:
 class Agent:
     """Base class for every unit of work scheduled by the kernel."""
 
+    #: How the kernel reacts when this agent raises. Override per subclass or
+    #: per instance.
+    restart_policy: "RestartPolicy" = RestartPolicy.NEVER
+    #: Maximum number of restarts before the failure becomes permanent.
+    max_restarts: int = 3
+
     def __init__(self, name: str) -> None:
         if not name:
             raise ValueError("agent name must be a non-empty string")
         self.name = name
         self.state = AgentState.READY
+        #: Name of the agent that spawned this one, if any.
+        self.parent: str | None = None
+        #: How often the kernel has restarted this agent so far.
+        self.restarts = 0
+
+    def on_restart(self) -> None:
+        """Hook called just before a restarted agent becomes runnable again.
+
+        Override to reset any internal state the failed step may have left
+        inconsistent. The default does nothing.
+        """
 
     @property
     def is_alive(self) -> bool:
@@ -73,8 +108,24 @@ class Agent:
         )
 
     def step(self, ctx: Context) -> None:
-        """Perform one unit of work. Subclasses must override this."""
+        """Perform one unit of work. Subclasses must override this.
+
+        May also be declared ``async def``; such agents require the asyncio
+        execution backend.
+        """
         raise NotImplementedError
+
+    def save_state(self) -> dict[str, Any]:
+        """Return this agent's durable state as a plain, serializable dict.
+
+        The default saves nothing: an agent is restored with its lifecycle
+        state and supervision counters, but no internal attributes. Override
+        together with :meth:`load_state` to persist real work.
+        """
+        return {}
+
+    def load_state(self, data: dict[str, Any]) -> None:
+        """Restore the state previously returned by :meth:`save_state`."""
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
         return f"<{type(self).__name__} {self.name} {self.state.value}>"
