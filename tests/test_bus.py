@@ -47,6 +47,17 @@ def test_metadata_is_carried_along():
     assert message.metadata == {"priority": 3}
 
 
+def test_message_metadata_is_immutable():
+    metadata = {"priority": 3}
+    message = Message(sender="a", to="b", payload="payload", metadata=metadata)
+
+    metadata["priority"] = 4
+
+    assert message.metadata == {"priority": 3}
+    with pytest.raises(TypeError):
+        message.metadata["priority"] = 5
+
+
 def test_unregister_removes_mailbox():
     bus = MessageBus()
     bus.register("a")
