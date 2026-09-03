@@ -17,6 +17,7 @@ class AgentState(str, Enum):
 
     READY = "ready"
     RUNNING = "running"
+    WAITING = "waiting"
     DONE = "done"
     FAILED = "failed"
 
@@ -39,6 +40,15 @@ class Context:
     def spawn(self, agent: "Agent") -> "Agent":
         return self.kernel.register(agent)
 
+    def wait(self) -> None:
+        """Block the agent until a message arrives.
+
+        The agent stays alive but is skipped on subsequent ticks until its
+        mailbox is non-empty, so an idle agent costs neither a scheduler slot
+        nor a worker thread. Calling :meth:`exit` afterwards still ends it.
+        """
+        self.agent.state = AgentState.WAITING
+
     def exit(self) -> None:
         """Mark the running agent as finished; it will not be scheduled again."""
         self.agent.state = AgentState.DONE
@@ -55,7 +65,12 @@ class Agent:
 
     @property
     def is_alive(self) -> bool:
-        return self.state in (AgentState.READY, AgentState.RUNNING)
+        """True while the agent may still run; waiting agents are alive."""
+        return self.state in (
+            AgentState.READY,
+            AgentState.RUNNING,
+            AgentState.WAITING,
+        )
 
     def step(self, ctx: Context) -> None:
         """Perform one unit of work. Subclasses must override this."""

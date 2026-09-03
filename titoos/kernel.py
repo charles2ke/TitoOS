@@ -5,12 +5,26 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from types import TracebackType
 from typing import Callable, Iterator
 
 from .agent import Agent, AgentState, Context, FunctionAgent
 from .bus import MessageBus
 from .message import Message
+
+
+class StopReason(str, Enum):
+    """Why :meth:`Kernel.run` stopped."""
+
+    #: Every agent reached DONE or FAILED.
+    FINISHED = "finished"
+    #: Live agents remain but all are waiting with empty mailboxes, so no
+    #: further tick could change anything. Either the workflow is complete or
+    #: the agents are deadlocked.
+    QUIESCENT = "quiescent"
+    #: The ``max_ticks`` budget ran out while agents were still runnable.
+    MAX_TICKS = "max_ticks"
 
 
 @dataclass(frozen=True)
@@ -20,6 +34,8 @@ class TickReport:
     tick: int
     ran: tuple[str, ...]
     failed: tuple[str, ...]
+    #: Live agents skipped this tick because they were waiting for a message.
+    waiting: tuple[str, ...] = ()
 
 
 class Kernel:
@@ -51,6 +67,7 @@ class Kernel:
         self._agents: dict[str, Agent] = {}
         self._tick = 0
         self.errors: list[tuple[str, BaseException]] = []
+        self.stop_reason: StopReason | None = None
         self._lock = threading.RLock()
         self._pool: ThreadPoolExecutor | None = None
 
@@ -94,9 +111,24 @@ class Kernel:
             self.bus.unregister(agent.name)
 
     def live_agents(self) -> Iterator[Agent]:
+        """Every agent that may still run, including waiting ones."""
         with self._lock:
             snapshot = tuple(self._agents.values())
         return (agent for agent in snapshot if agent.is_alive)
+
+    def is_quiescent(self) -> bool:
+        """True when live agents remain but none of them can make progress.
+
+        That is the case when every live agent is waiting and no message is
+        pending for any of them, so running further ticks is pointless.
+        """
+        live = tuple(self.live_agents())
+        if not live:
+            return False
+        return all(
+            agent.state is AgentState.WAITING and not self.bus.pending(agent.name)
+            for agent in live
+        )
 
     def _run_agent(self, agent: Agent, tick: int, inbox: list[Message]) -> bool:
         """Run a single agent for one tick. Returns ``True`` if it succeeded."""
@@ -128,14 +160,26 @@ class Kernel:
         a tick is always delivered on the following one. The report lists
         agents in registration order, not completion order, so results stay
         deterministic regardless of the worker count.
+
+        Waiting agents are skipped unless a message was pending for them at
+        the tick boundary, in which case they wake and run with it.
         """
         self._tick += 1
         tick = self._tick
-        scheduled = list(self.live_agents())
         # Drain every mailbox up front so the set of messages an agent sees is
-        # fixed before any agent runs. Without this the delivery of a message
-        # would depend on the order in which workers happen to be scheduled.
-        inboxes = [self.bus.receive(agent.name) for agent in scheduled]
+        # fixed before any agent runs. Without this both the delivery of a
+        # message and the wake-up of a waiting agent would depend on the order
+        # in which workers happen to be scheduled.
+        scheduled: list[Agent] = []
+        inboxes: list[list[Message]] = []
+        waiting: list[str] = []
+        for agent in self.live_agents():
+            inbox = self.bus.receive(agent.name)
+            if agent.state is AgentState.WAITING and not inbox:
+                waiting.append(agent.name)
+                continue
+            scheduled.append(agent)
+            inboxes.append(inbox)
 
         if self.max_workers == 1 or len(scheduled) < 2:
             outcomes = [
@@ -157,17 +201,30 @@ class Kernel:
 
         ran = tuple(a.name for a, ok in zip(scheduled, outcomes) if ok)
         failed = tuple(a.name for a, ok in zip(scheduled, outcomes) if not ok)
-        return TickReport(tick=tick, ran=ran, failed=failed)
+        return TickReport(tick=tick, ran=ran, failed=failed, waiting=tuple(waiting))
 
     def run(self, max_ticks: int = 100) -> list[TickReport]:
-        """Run until every agent is finished or ``max_ticks`` is reached."""
+        """Run until the agents finish, go quiescent, or ``max_ticks`` is hit.
+
+        Check :attr:`stop_reason` afterwards to tell those cases apart.
+        """
         if max_ticks < 0:
             raise ValueError("max_ticks must not be negative")
         reports: list[TickReport] = []
+        self.stop_reason = StopReason.MAX_TICKS
         for _ in range(max_ticks):
             if not any(self.live_agents()):
+                self.stop_reason = StopReason.FINISHED
+                break
+            if self.is_quiescent():
+                self.stop_reason = StopReason.QUIESCENT
                 break
             reports.append(self.step())
+        else:
+            if not any(self.live_agents()):
+                self.stop_reason = StopReason.FINISHED
+            elif self.is_quiescent():
+                self.stop_reason = StopReason.QUIESCENT
         return reports
 
     def shutdown(self, wait: bool = True) -> None:

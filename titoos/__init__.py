@@ -2,7 +2,7 @@
 
 from .agent import Agent, AgentState, Context, FunctionAgent
 from .bus import MessageBus
-from .kernel import Kernel, TickReport
+from .kernel import Kernel, StopReason, TickReport
 from .message import BROADCAST, Message
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "Kernel",
     "Message",
     "MessageBus",
+    "StopReason",
     "TickReport",
 ]
 
