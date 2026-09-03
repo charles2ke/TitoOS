@@ -1,7 +1,12 @@
-"""In-memory message bus used by the kernel to route agent messages."""
+"""In-memory message bus used by the kernel to route agent messages.
+
+All operations are thread-safe so agents running concurrently in a worker
+pool can send and receive messages without external locking.
+"""
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict, deque
 from typing import Any, Iterable
 
@@ -13,24 +18,28 @@ class MessageBus:
 
     def __init__(self) -> None:
         self._mailboxes: dict[str, deque[Message]] = defaultdict(deque)
+        self._lock = threading.RLock()
 
     def register(self, name: str) -> None:
         """Create an (empty) mailbox for ``name`` if it does not exist yet."""
-        self._mailboxes[name]  # noqa: B018 - defaultdict creates the mailbox
+        with self._lock:
+            self._mailboxes[name]  # noqa: B018 - defaultdict creates the mailbox
 
     def unregister(self, name: str) -> None:
-        self._mailboxes.pop(name, None)
+        with self._lock:
+            self._mailboxes.pop(name, None)
 
     def send(self, message: Message) -> None:
         """Deliver ``message`` to its recipient, or to everyone if broadcast."""
-        if message.is_broadcast:
-            for name, mailbox in self._mailboxes.items():
-                if name != message.sender:
-                    mailbox.append(message)
-            return
-        if message.to not in self._mailboxes:
-            raise KeyError(f"unknown recipient: {message.to!r}")
-        self._mailboxes[message.to].append(message)
+        with self._lock:
+            if message.is_broadcast:
+                for name, mailbox in self._mailboxes.items():
+                    if name != message.sender:
+                        mailbox.append(message)
+                return
+            if message.to not in self._mailboxes:
+                raise KeyError(f"unknown recipient: {message.to!r}")
+            self._mailboxes[message.to].append(message)
 
     def post(self, sender: str, to: str, payload: Any = None, **metadata: Any) -> Message:
         """Build and send a message in one call."""
@@ -43,18 +52,22 @@ class MessageBus:
 
     def receive(self, name: str) -> list[Message]:
         """Drain and return every pending message for ``name``."""
-        mailbox = self._mailboxes.get(name)
-        if not mailbox:
-            return []
-        messages = list(mailbox)
-        mailbox.clear()
-        return messages
+        with self._lock:
+            mailbox = self._mailboxes.get(name)
+            if not mailbox:
+                return []
+            messages = list(mailbox)
+            mailbox.clear()
+            return messages
 
     def pending(self, name: str) -> int:
-        return len(self._mailboxes.get(name, ()))
+        with self._lock:
+            return len(self._mailboxes.get(name, ()))
 
     def mailboxes(self) -> Iterable[str]:
-        return tuple(self._mailboxes)
+        with self._lock:
+            return tuple(self._mailboxes)
 
     def has_traffic(self) -> bool:
-        return any(self._mailboxes.values())
+        with self._lock:
+            return any(self._mailboxes.values())

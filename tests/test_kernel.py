@@ -100,7 +100,8 @@ def test_agents_exchange_messages_across_ticks():
     def pinger(ctx):
         if ctx.tick == 1:
             ctx.send("ponger", "ping")
-        else:
+            return
+        if ctx.inbox:
             received.extend(m.payload for m in ctx.inbox)
             ctx.exit()
 
