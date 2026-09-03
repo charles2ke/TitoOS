@@ -39,6 +39,17 @@ def test_run_stops_when_all_agents_are_done():
     assert reports[-1].ran == ("long",)
 
 
+def test_done_agent_mailbox_is_unregistered():
+    kernel = Kernel()
+    kernel.register(Counter("done", 1))
+
+    kernel.run(max_ticks=1)
+
+    assert "done" not in kernel.bus.mailboxes()
+    with pytest.raises(KeyError):
+        kernel.bus.post("sender", "done", "late")
+
+
 def test_run_respects_max_ticks():
     kernel = Kernel()
     forever = kernel.register(Counter("forever", 1_000))
@@ -66,6 +77,20 @@ def test_failing_agent_is_isolated():
     assert [name for name, _ in kernel.errors] == ["boom"]
     assert reports[0].failed == ("boom",)
     assert reports[1].ran == ("survivor",)
+
+
+def test_failed_agent_mailbox_is_unregistered():
+    kernel = Kernel()
+
+    def boom(ctx):
+        raise RuntimeError("boom")
+
+    kernel.spawn("boom", boom)
+    kernel.run(max_ticks=1)
+
+    assert "boom" not in kernel.bus.mailboxes()
+    with pytest.raises(KeyError):
+        kernel.bus.post("sender", "boom", "late")
 
 
 def test_agents_exchange_messages_across_ticks():

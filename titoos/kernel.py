@@ -59,6 +59,10 @@ class Kernel:
         self._agents.pop(name, None)
         self.bus.unregister(name)
 
+    def _unregister_finished_mailbox(self, agent: Agent) -> None:
+        if agent.state in (AgentState.DONE, AgentState.FAILED):
+            self.bus.unregister(agent.name)
+
     def live_agents(self) -> Iterator[Agent]:
         return (agent for agent in self._agents.values() if agent.is_alive)
 
@@ -77,10 +81,13 @@ class Kernel:
                 agent.state = AgentState.FAILED
                 self.errors.append((agent.name, exc))
                 failed.append(agent.name)
+                self._unregister_finished_mailbox(agent)
                 continue
             ran.append(agent.name)
             if agent.state is AgentState.RUNNING:
                 agent.state = AgentState.READY
+            else:
+                self._unregister_finished_mailbox(agent)
         return TickReport(tick=self._tick, ran=tuple(ran), failed=tuple(failed))
 
     def run(self, max_ticks: int = 100) -> list[TickReport]:
