@@ -56,11 +56,40 @@ class Counter(Agent):
 
 | Piece | Role |
 | --- | --- |
-| `Kernel` | Registers agents and runs one `step()` per agent per tick. |
+| `Kernel` | Registers agents and runs one `step()` per runnable agent per tick. |
 | `Agent` / `FunctionAgent` | A unit of work; implement `step(ctx)` or wrap a callable. |
-| `Context` | Per-tick handle: `tick`, `inbox`, `send`, `broadcast`, `spawn`, `exit`. |
+| `Context` | Per-tick handle: `tick`, `inbox`, `send`, `broadcast`, `spawn`, `wait`, `exit`. |
 | `MessageBus` | Mailboxes and routing, including `BROADCAST` delivery. |
-| `TickReport` | Which agents ran or failed during a tick. |
+| `TickReport` | Which agents ran, failed, or were waiting during a tick. |
+| `StopReason` | Why `run()` stopped: `FINISHED`, `QUIESCENT`, or `MAX_TICKS`. |
+
+## Blocking and quiescence
+
+An agent with nothing to do calls `ctx.wait()`. It stays alive but is skipped
+on later ticks until a message lands in its mailbox, so an idle agent costs
+neither a scheduler slot nor a worker thread:
+
+```python
+def worker(ctx):
+    if not ctx.inbox:
+        ctx.wait()      # skipped until someone sends to us
+        return
+    handle(ctx.inbox)
+    ctx.exit()
+```
+
+Because waiting agents make no progress on their own, the kernel can tell the
+difference between work that is *done* and work that is *stuck*. `run()` stops
+as soon as every live agent is waiting with an empty mailbox, and records why
+in `kernel.stop_reason`:
+
+| `StopReason` | Meaning |
+| --- | --- |
+| `FINISHED` | Every agent reached `DONE` or `FAILED`. |
+| `QUIESCENT` | Live agents remain, but all are waiting on messages that will never come — a completed workflow or a deadlock. |
+| `MAX_TICKS` | The tick budget ran out while agents were still runnable. |
+
+`TickReport.waiting` lists the agents skipped on a given tick.
 
 ## Multi-threading
 
@@ -85,10 +114,18 @@ Threading does not change results. The scheduler guarantees:
   starts, and mailboxes are drained *before* any agent runs — so a message
   sent during a tick is always delivered in the following one, never
   opportunistically within the same tick.
+- **Wake-ups are deterministic.** A waiting agent runs on a tick if and only if
+  its mailbox was non-empty at that tick's boundary, never depending on which
+  worker happened to run first.
 - **Reports are deterministic.** `TickReport.ran` and `.failed` list agents in
   registration order, not completion order.
 - **Failures stay isolated.** An agent raising in a worker thread is marked
   `FAILED` and recorded in `kernel.errors` like in serial mode.
+
+Known limitation: an agent spawned mid-tick registers its mailbox immediately,
+so whether a `ctx.broadcast()` made during that same tick reaches it depends on
+worker timing. Spawn and broadcast in the same tick are therefore not yet
+deterministic; sequence them across ticks if it matters.
 
 `MessageBus` is thread-safe, and `ctx.send`, `ctx.broadcast`, and `ctx.spawn`
 may all be called from worker threads. Agents that share their own mutable
