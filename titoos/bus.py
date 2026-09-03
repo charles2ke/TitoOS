@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict, deque
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from .message import BROADCAST, Message
 
@@ -67,6 +67,20 @@ class MessageBus:
     def mailboxes(self) -> Iterable[str]:
         with self._lock:
             return tuple(self._mailboxes)
+
+    def requeue(self, name: str, messages: Sequence[Message]) -> None:
+        """Put ``messages`` back at the front of ``name``'s mailbox.
+
+        Used when an agent fails mid-tick and is restarted: the messages it
+        was handed must be redelivered rather than lost.
+        """
+        if not messages:
+            return
+        with self._lock:
+            mailbox = self._mailboxes.get(name)
+            if mailbox is None:
+                return
+            mailbox.extendleft(reversed(messages))
 
     def dump(self) -> dict[str, list[Message]]:
         """A copy of every mailbox, without consuming anything."""

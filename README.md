@@ -60,8 +60,11 @@ class Counter(Agent):
 | `Agent` / `FunctionAgent` | A unit of work; implement `step(ctx)` or wrap a callable. |
 | `Context` | Per-tick handle: `tick`, `inbox`, `send`, `broadcast`, `spawn`, `wait`, `exit`. |
 | `MessageBus` | Mailboxes and routing, including `BROADCAST` delivery. |
-| `TickReport` | Which agents ran, failed, or were waiting during a tick. |
+| `TickReport` | Which agents ran, failed, waited or were restarted during a tick. |
 | `StopReason` | Why `run()` stopped: `FINISHED`, `QUIESCENT`, or `MAX_TICKS`. |
+| `ExecutionBackend` | How a tick's agents run: `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
+| `RestartPolicy` | What happens when an agent raises: `NEVER` or `ON_FAILURE`. |
+| `Snapshot` | A consistent, serializable picture of the kernel between ticks. |
 
 ## Blocking and quiescence
 
@@ -135,6 +138,101 @@ An agent that raises is marked `AgentState.FAILED` and removed from the
 schedule; the exception is recorded in `kernel.errors` so one bad agent cannot
 take down the rest of the system. `kernel.run()` stops once no agent is alive
 or `max_ticks` is reached.
+
+## Async execution
+
+The backend decides *how* a tick's agents run; the kernel still decides *which*
+agents run and what they see. `AsyncBackend` runs them on an event loop and
+supports `async def step(ctx)`:
+
+```python
+from titoos import AsyncBackend, Agent, Kernel
+
+class Fetcher(Agent):
+    async def step(self, ctx):
+        ctx.send("sink", await fetch_something())
+        ctx.exit()
+
+with Kernel(backend=AsyncBackend()) as kernel:
+    kernel.register(Fetcher("fetcher"))
+    kernel.run()
+```
+
+`SerialBackend` (the default) and `ThreadBackend` raise a `TypeError` if given
+an async agent rather than silently skipping it — including a plain `async def`
+callable handed to `kernel.spawn()`. `AsyncBackend` also runs
+ordinary sync agents, but a blocking one stalls the whole tick — use
+`ThreadBackend` for those. `max_workers=N` remains a shorthand for
+`ThreadBackend(N)`.
+
+All three backends produce identical results for the same program.
+
+## Supervision
+
+`ctx.spawn()` records the spawning agent as the child's `parent`, and
+`ctx.children()` lists them. Agents opt into restarts:
+
+```python
+from titoos import Agent, RestartPolicy
+
+class Worker(Agent):
+    restart_policy = RestartPolicy.ON_FAILURE
+    max_restarts = 3
+
+    def on_restart(self):
+        self.partial_work = None   # reset anything the failed step left behind
+
+    def step(self, ctx):
+        ...
+```
+
+A failing agent is reset to `READY` and run again on the next tick, keeping its
+mailbox. The messages delivered to the step that failed are put back at the
+front of that mailbox, so a crash while handling a job redelivers the job
+rather than losing it. Once `max_restarts` is exhausted it stays `FAILED`, and its parent
+receives a message whose payload is `CHILD_FAILED` with `child` and `restarts`
+metadata — which also wakes a supervisor that was waiting. `TickReport.restarted`
+lists the agents restarted on a tick.
+
+Restart decisions are made at the tick barrier in registration order, so they
+never depend on worker timing. All restarts for a tick are applied before any
+escalation is sent, so a parent that failed and was restarted in the same tick
+as its child is still notified.
+
+## Persistence
+
+A tick boundary is the only moment when no agent is mid-execution and no message
+is in flight, so that is where the kernel checkpoints. Agents opt in:
+
+```python
+class Accumulator(Agent):
+    def save_state(self):
+        return {"total": self.total}
+
+    def load_state(self, data):
+        self.total = data["total"]
+```
+
+```python
+text = kernel.snapshot().to_json()
+...
+restored = Kernel.restore(Snapshot.from_json(text), {"Accumulator": Accumulator})
+restored.run()
+```
+
+A snapshot holds the tick number, every agent's lifecycle state, parent link,
+restart count and saved data, plus all pending messages. `snapshot()` raises if
+called while agents are running, e.g. from inside a `step()`.
+
+Behaviour cannot be serialized, so `restore()` takes factories mapping each
+recorded `kind` (the class name) to a callable building a bare agent of that
+kind. A factory is required for every agent that is still alive; missing ones
+are an error rather than a silent drop. Agents that had already finished are
+restored as inert `FinishedAgent` placeholders that preserve their name,
+outcome, parent and saved data.
+
+Anything not returned by `save_state()` is not preserved — the default saves
+nothing.
 
 ## Tests
 

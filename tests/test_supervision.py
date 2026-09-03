@@ -218,3 +218,89 @@ def test_restarted_agent_keeps_its_pending_messages():
     # The mailbox survived the restart rather than being reclaimed.
     assert picky.seen == ["after-restart"]
     assert picky.state is AgentState.DONE
+
+
+def test_restart_redelivers_the_messages_of_the_failed_step():
+    """A crash mid-job must not lose the job."""
+
+    class Handler(Agent):
+        restart_policy = RestartPolicy.ON_FAILURE
+
+        def __init__(self, name):
+            super().__init__(name)
+            self.seen = []
+            self.crashed = False
+
+        def step(self, ctx):
+            if ctx.inbox and not self.crashed:
+                self.crashed = True
+                raise RuntimeError("crash while handling the job")
+            self.seen.extend(m.payload for m in ctx.inbox)
+            ctx.wait()
+
+    kernel = Kernel()
+    handler = kernel.register(Handler("handler"))
+
+    def sender(ctx):
+        if ctx.tick == 1:
+            ctx.send("handler", "job-1")
+            ctx.send("handler", "job-2")
+            ctx.exit()
+
+    kernel.spawn("sender", sender)
+    kernel.run(max_ticks=8)
+
+    assert handler.seen == ["job-1", "job-2"]  # order preserved, nothing lost
+    assert handler.restarts == 1
+
+
+def test_no_redelivery_when_the_agent_is_not_restarted():
+    class Doomed(Agent):
+        def __init__(self, name):
+            super().__init__(name)
+
+        def step(self, ctx):
+            raise RuntimeError("boom")
+
+    kernel = Kernel()
+    kernel.register(Doomed("doomed"))
+    kernel.spawn("sender", lambda ctx: (ctx.send("doomed", "x"), ctx.exit()))
+    kernel.run(max_ticks=5)
+
+    # The agent stays dead and its mailbox is reclaimed, not requeued.
+    assert kernel.get("doomed").state is AgentState.FAILED
+    assert "doomed" not in kernel.bus.mailboxes()
+
+
+@pytest.mark.parametrize("order", [["parent", "child"], ["child", "parent"]])
+def test_escalation_reaches_a_parent_that_failed_in_the_same_tick(order):
+    """Restarts are applied before escalation, so order must not matter."""
+
+    class Parent(Agent):
+        restart_policy = RestartPolicy.ON_FAILURE
+
+        def __init__(self, name):
+            super().__init__(name)
+            self.got = []
+            self.attempts = 0
+
+        def step(self, ctx):
+            self.got.extend(m.payload for m in ctx.inbox)
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("parent hiccup")
+            ctx.wait()
+
+    class Child(Agent):
+        def step(self, ctx):
+            raise RuntimeError("child dies")
+
+    kernel = Kernel()
+    built = {}
+    for name in order:
+        built[name] = kernel.register(Parent("parent") if name == "parent" else Child("child"))
+    built["child"].parent = "parent"
+
+    kernel.run(max_ticks=6)
+
+    assert built["parent"].got == [CHILD_FAILED]

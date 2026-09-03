@@ -210,3 +210,34 @@ def test_max_workers_still_selects_a_backend():
     assert isinstance(Kernel(max_workers=4).backend, ThreadBackend)
     with pytest.raises(ValueError):
         Kernel(max_workers=0)
+
+
+def test_async_callables_work_through_spawn():
+    """kernel.spawn(name, async_fn) must be awaited, not silently dropped."""
+    kernel = Kernel(backend=AsyncBackend())
+    seen = []
+
+    async def worker(ctx):
+        await asyncio.sleep(0)
+        seen.append(ctx.tick)
+        ctx.exit()
+
+    kernel.spawn("worker", worker)
+    with kernel:
+        kernel.run(max_ticks=5)
+
+    assert seen == [1]
+    assert kernel.get("worker").state is AgentState.DONE
+
+
+@pytest.mark.parametrize("backend", [SerialBackend, lambda: ThreadBackend(4)])
+def test_sync_backends_reject_async_callables_too(backend):
+    kernel = Kernel(backend=backend())
+
+    async def worker(ctx):
+        ctx.exit()
+
+    kernel.spawn("worker", worker)
+
+    with pytest.raises(TypeError, match="async step"):
+        kernel.step()

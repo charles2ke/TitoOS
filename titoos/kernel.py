@@ -130,22 +130,22 @@ class Kernel:
             self._agents.pop(name, None)
         self.bus.unregister(name)
 
-    def _supervise(self, agent: Agent) -> bool:
+    def _supervise(self, agent: Agent, inbox: list[Message]) -> bool:
         """Apply ``agent``'s restart policy after a failure.
 
         Returns ``True`` if the agent was restarted. Runs at the tick barrier
-        rather than inside a worker so the decision, the restart counter and
-        any escalation message are all deterministic.
+        rather than inside a worker so the decision and the restart counter
+        are deterministic. The messages handed to the failed step are put back
+        so a crash mid-job does not lose work.
         """
         if agent.restart_policy is not RestartPolicy.ON_FAILURE:
-            self._escalate(agent)
             return False
         if agent.restarts >= agent.max_restarts:
-            self._escalate(agent)
             return False
         agent.restarts += 1
         agent.on_restart()
         agent.state = AgentState.READY
+        self.bus.requeue(agent.name, inbox)
         return True
 
     def _escalate(self, agent: Agent) -> None:
@@ -251,12 +251,20 @@ class Kernel:
         outcomes = self.backend.run_tick(self, scheduled, inboxes, tick)
 
         # Supervision runs at the barrier, in registration order, so restarts
-        # and escalation messages do not depend on worker timing.
+        # and escalation messages do not depend on worker timing. Restarts are
+        # applied first and escalation second, so a parent that failed and was
+        # restarted in this same tick is still notified about its children.
+        casualties = [
+            (agent, inbox)
+            for agent, inbox, ok in zip(scheduled, inboxes, outcomes)
+            if not ok
+        ]
         restarted = tuple(
-            agent.name
-            for agent, ok in zip(scheduled, outcomes)
-            if not ok and self._supervise(agent)
+            agent.name for agent, inbox in casualties if self._supervise(agent, inbox)
         )
+        for agent, _ in casualties:
+            if agent.state is AgentState.FAILED:
+                self._escalate(agent)
 
         # Reclaim mailboxes only once the whole tick is over: dropping them
         # mid-tick would make sending to an agent that finished concurrently

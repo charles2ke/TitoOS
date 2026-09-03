@@ -13,7 +13,7 @@ import inspect
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Protocol, Sequence
 
-from .agent import Agent
+from .agent import Agent, FunctionAgent
 from .message import Message
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -41,11 +41,21 @@ class ExecutionBackend:
     def shutdown(self, wait: bool = True) -> None:
         """Release any resources held by the backend."""
 
+    @staticmethod
+    def _is_async_agent(agent: Agent) -> bool:
+        """True if running ``agent`` produces a coroutine to await.
+
+        ``FunctionAgent`` keeps its callable behind a uniform sync ``step``,
+        so the wrapped function has to be inspected too.
+        """
+        target = agent.wrapped if isinstance(agent, FunctionAgent) else agent.step
+        return inspect.iscoroutinefunction(target)
+
     def _reject_async(self, agents: Sequence[Agent]) -> None:
         if self.supports_async_agents:
             return
         for agent in agents:
-            if inspect.iscoroutinefunction(agent.step):
+            if self._is_async_agent(agent):
                 raise TypeError(
                     f"agent {agent.name!r} defines an async step() but "
                     f"{type(self).__name__} cannot await it; use AsyncBackend"

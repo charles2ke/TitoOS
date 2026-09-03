@@ -132,11 +132,20 @@ class Agent:
 
 
 class FunctionAgent(Agent):
-    """Adapts a plain callable ``fn(ctx)`` into an :class:`Agent`."""
+    """Adapts a plain callable ``fn(ctx)`` into an :class:`Agent`.
 
-    def __init__(self, name: str, fn: Callable[[Context], None]) -> None:
+    The callable may be ``async def``; the coroutine is returned so the
+    asyncio backend can await it rather than dropping it on the floor.
+    """
+
+    def __init__(self, name: str, fn: Callable[[Context], Any]) -> None:
         super().__init__(name)
         self._fn = fn
 
-    def step(self, ctx: Context) -> None:
-        self._fn(ctx)
+    @property
+    def wrapped(self) -> Callable[[Context], Any]:
+        """The callable this agent adapts."""
+        return self._fn
+
+    def step(self, ctx: Context) -> Any:
+        return self._fn(ctx)
