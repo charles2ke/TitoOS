@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Sequence
 
 from .agent import Agent, AgentState, Context, FunctionAgent, RestartPolicy
 from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBackend
@@ -170,9 +170,13 @@ class Kernel:
 
     def live_agents(self) -> Iterator[Agent]:
         """Every agent that may still run, including waiting ones."""
+        return iter(self._live_snapshot())
+
+    def _live_snapshot(self) -> tuple[Agent, ...]:
+        """The live agents as of now, in registration order."""
         with self._lock:
-            snapshot = tuple(self._agents.values())
-        return (agent for agent in snapshot if agent.is_alive)
+            agents = tuple(self._agents.values())
+        return tuple(agent for agent in agents if agent.is_alive)
 
     def is_quiescent(self) -> bool:
         """True when live agents remain but none of them can make progress.
@@ -180,13 +184,14 @@ class Kernel:
         That is the case when every live agent is waiting and no message is
         pending for any of them, so running further ticks is pointless.
         """
-        live = tuple(self.live_agents())
+        return self._is_quiescent(self._live_snapshot())
+
+    def _is_quiescent(self, live: Sequence[Agent]) -> bool:
         if not live:
             return False
-        return all(
-            agent.state is AgentState.WAITING and not self.bus.pending(agent.name)
-            for agent in live
-        )
+        if any(agent.state is not AgentState.WAITING for agent in live):
+            return False
+        return not self.bus.any_pending([agent.name for agent in live])
 
     def _run_agent(self, agent: Agent, tick: int, inbox: list[Message]) -> bool:
         """Run a single agent for one tick. Returns ``True`` if it succeeded."""
@@ -240,8 +245,8 @@ class Kernel:
         scheduled: list[Agent] = []
         inboxes: list[list[Message]] = []
         waiting: list[str] = []
-        for agent in self.live_agents():
-            inbox = self.bus.receive(agent.name)
+        live = self._live_snapshot()
+        for agent, inbox in zip(live, self.bus.receive_many([a.name for a in live])):
             if agent.state is AgentState.WAITING and not inbox:
                 waiting.append(agent.name)
                 continue
@@ -293,17 +298,19 @@ class Kernel:
         reports: list[TickReport] = []
         self.stop_reason = StopReason.MAX_TICKS
         for _ in range(max_ticks):
-            if not any(self.live_agents()):
+            live = self._live_snapshot()
+            if not live:
                 self.stop_reason = StopReason.FINISHED
                 break
-            if self.is_quiescent():
+            if self._is_quiescent(live):
                 self.stop_reason = StopReason.QUIESCENT
                 break
             reports.append(self.step())
         else:
-            if not any(self.live_agents()):
+            live = self._live_snapshot()
+            if not live:
                 self.stop_reason = StopReason.FINISHED
-            elif self.is_quiescent():
+            elif self._is_quiescent(live):
                 self.stop_reason = StopReason.QUIESCENT
         return reports
 

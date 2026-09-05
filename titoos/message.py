@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 BROADCAST = "*"
 
+#: Shared read-only mapping reused by every message without metadata, which is
+#: the common case; it saves a dict plus a proxy allocation per message.
+_EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
+
 
 @dataclass(frozen=True)
 class Message:
@@ -23,7 +27,11 @@ class Message:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        metadata = self.metadata
+        if not metadata:
+            object.__setattr__(self, "metadata", _EMPTY_METADATA)
+        else:
+            object.__setattr__(self, "metadata", MappingProxyType(dict(metadata)))
 
     @property
     def is_broadcast(self) -> bool:

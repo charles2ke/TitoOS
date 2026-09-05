@@ -64,6 +64,29 @@ class MessageBus:
         with self._lock:
             return len(self._mailboxes.get(name, ()))
 
+    def receive_many(self, names: Sequence[str]) -> list[list[Message]]:
+        """Drain the mailboxes of ``names`` in one pass, in the same order.
+
+        Equivalent to calling :meth:`receive` on each name, but takes the lock
+        once for the whole batch, which is what the kernel needs at a tick
+        boundary.
+        """
+        with self._lock:
+            drained: list[list[Message]] = []
+            for name in names:
+                mailbox = self._mailboxes.get(name)
+                if not mailbox:
+                    drained.append([])
+                    continue
+                drained.append(list(mailbox))
+                mailbox.clear()
+            return drained
+
+    def any_pending(self, names: Iterable[str]) -> bool:
+        """True if at least one of ``names`` has a pending message."""
+        with self._lock:
+            return any(self._mailboxes.get(name) for name in names)
+
     def mailboxes(self) -> Iterable[str]:
         with self._lock:
             return tuple(self._mailboxes)
