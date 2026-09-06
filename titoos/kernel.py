@@ -191,7 +191,7 @@ class Kernel:
             return False
         if any(agent.state is not AgentState.WAITING for agent in live):
             return False
-        return not self.bus.any_pending([agent.name for agent in live])
+        return not self.bus.any_pending(agent.name for agent in live)
 
     def _run_agent(self, agent: Agent, tick: int, inbox: list[Message]) -> bool:
         """Run a single agent for one tick. Returns ``True`` if it succeeded."""
