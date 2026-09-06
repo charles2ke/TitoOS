@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .kernel import Kernel
 
 
-#: Attribute an agent's async-ness is memoized under.
+#: Attribute used to memoize an agent's async-ness.
 _ASYNC_CACHE_ATTR = "_titoos_is_async"
 
 
