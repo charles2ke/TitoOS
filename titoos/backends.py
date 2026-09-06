@@ -20,6 +20,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .kernel import Kernel
 
 
+#: Attribute used to memoize an agent's async-ness.
+_ASYNC_CACHE_ATTR = "_titoos_is_async"
+
+
 class Job(Protocol):
     """A single agent to run for a tick."""
 
@@ -46,10 +50,20 @@ class ExecutionBackend:
         """True if running ``agent`` produces a coroutine to await.
 
         ``FunctionAgent`` keeps its callable behind a uniform sync ``step``,
-        so the wrapped function has to be inspected too.
+        so the wrapped function has to be inspected too. The answer cannot
+        change for a given agent, so it is cached on the instance: the check
+        would otherwise run for every agent on every tick.
         """
+        cached = getattr(agent, _ASYNC_CACHE_ATTR, None)
+        if cached is not None:
+            return cached
         target = agent.wrapped if isinstance(agent, FunctionAgent) else agent.step
-        return inspect.iscoroutinefunction(target)
+        result = inspect.iscoroutinefunction(target)
+        try:
+            setattr(agent, _ASYNC_CACHE_ATTR, result)
+        except AttributeError:  # pragma: no cover - e.g. __slots__ subclasses
+            pass
+        return result
 
     def _reject_async(self, agents: Sequence[Agent]) -> None:
         if self.supports_async_agents:
