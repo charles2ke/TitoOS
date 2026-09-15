@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import errno
 import os
-from pathlib import Path
-from typing import Any
+import stat
+from contextlib import contextmanager
+from pathlib import Path, PurePath
+from typing import Any, Iterator
 
 from .base import Integration
+
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_DIR_FD_SUPPORTED = {os.open, os.stat, os.mkdir, os.unlink} <= os.supports_dir_fd
 
 
 class FileSystemIntegration(Integration):
     """Read and write files below one directory and nowhere else.
 
-    Every path is resolved and checked against ``root``, so ``"../../etc"`` or
-    a symlink pointing outside the sandbox is rejected rather than followed.
+    Paths are walked one component at a time, each opened relative to the file
+    descriptor of its parent and never following symlinks, so ``"../../etc"``,
+    a symlink pointing outside the sandbox, or a directory swapped for a
+    symlink between the check and the read is rejected rather than followed.
     Paths are always interpreted relative to ``root``; absolute paths are an
     error, not an escape hatch.
     """
@@ -38,6 +48,11 @@ class FileSystemIntegration(Integration):
         max_bytes: int = 1 << 20,
     ) -> None:
         super().__init__(name)
+        if not _DIR_FD_SUPPORTED:
+            raise ValueError(
+                "this platform cannot open files relative to a directory "
+                "descriptor, so the sandbox cannot be enforced safely"
+            )
         resolved = Path(root).expanduser().resolve()
         if not resolved.is_dir():
             raise ValueError(f"root is not an existing directory: {resolved}")
@@ -55,81 +70,184 @@ class FileSystemIntegration(Integration):
             "max_bytes": self.max_bytes,
         }
 
-    def _resolve(self, path: str, operation: str) -> Path:
-        candidate = Path(path)
+    def _parts(self, path: str, operation: str) -> list[str]:
+        """Split a caller path into components, rejecting escapes up front."""
+        candidate = PurePath(path)
         if candidate.is_absolute() or candidate.drive or candidate.root:
             raise self._fail(f"path must be relative to the root: {path!r}", operation)
-        resolved = (self.root / candidate).resolve()
-        if resolved != self.root and self.root not in resolved.parents:
+        parts = [part for part in candidate.parts if part not in (".", "")]
+        if any(part == ".." for part in parts):
             raise self._fail(
                 f"path escapes the sandbox root {self.root}: {path!r}", operation
             )
-        return resolved
+        return parts
 
-    def _writable(self, path: str, operation: str) -> Path:
+    def _writable(self, path: str, operation: str) -> list[str]:
         if self.read_only:
             raise self._fail(f"integration {self.name!r} is read-only", operation)
-        return self._resolve(path, operation)
+        return self._parts(path, operation)
 
+    @contextmanager
+    def _walk(
+        self, parts: list[str], path: str, operation: str, *, create: bool = False
+    ) -> Iterator[int]:
+        """Yield a descriptor for the directory holding ``parts[-1]``.
+
+        Each component is opened relative to the descriptor of its parent with
+        ``O_NOFOLLOW``, so the sandbox cannot be escaped by swapping a checked
+        directory for a symlink between the check and the operation.
+        """
+        flags = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+        fd = os.open(self.root, flags)
+        try:
+            for part in parts[:-1]:
+                if create:
+                    try:
+                        os.mkdir(part, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                nxt = os.open(part, flags | _O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+            yield fd
+        except OSError as exc:
+            raise self._describe_oserror(exc, path, operation) from exc
+        finally:
+            os.close(fd)
+
+    def _describe_oserror(self, exc: OSError, path: str, operation: str) -> Exception:
+        """Translate a no-follow failure into a sandbox error, else pass through."""
+        if exc.errno == errno.ELOOP:
+            return self._fail(
+                f"path escapes the sandbox root {self.root}: {path!r}", operation
+            )
+        return exc
+
+    @contextmanager
+    def _open(
+        self,
+        path: str,
+        operation: str,
+        flags: int,
+        mode: str,
+        *,
+        encoding: str,
+        writable: bool = False,
+    ) -> Iterator[Any]:
+        """Open a sandboxed file without ever following a symlink."""
+        if writable:
+            parts = self._writable(path, operation)
+        else:
+            parts = self._parts(path, operation)
+        if not parts:
+            raise self._fail(f"{path!r} is not a file", operation)
+        with self._walk(parts, path, operation, create=writable) as dir_fd:
+            try:
+                fd = os.open(
+                    parts[-1], flags | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd
+                )
+            except OSError as exc:
+                raise self._describe_oserror(exc, path, operation) from exc
+            try:
+                handle = os.fdopen(fd, mode, encoding=encoding)
+            except Exception:
+                os.close(fd)
+                raise
+            with handle:
+                yield handle
     def read_text(self, path: str, *, encoding: str = "utf-8") -> str:
         """Return the contents of ``path``."""
-        target = self._resolve(path, "read_text")
         try:
-            if target.stat().st_size > self.max_bytes:
-                raise self._fail(
-                    f"{path!r} is larger than max_bytes ({self.max_bytes} bytes)",
-                    "read_text",
-                )
-            return target.read_text(encoding=encoding)
+            with self._open(
+                path, "read_text", os.O_RDONLY, "r", encoding=encoding
+            ) as handle:
+                if os.fstat(handle.fileno()).st_size > self.max_bytes:
+                    raise self._fail(
+                        f"{path!r} is larger than max_bytes ({self.max_bytes} bytes)",
+                        "read_text",
+                    )
+                return handle.read()
         except OSError as exc:
             raise self._fail(f"cannot read {path!r}: {exc}", "read_text") from exc
 
     def write_text(self, path: str, content: str, *, encoding: str = "utf-8") -> int:
         """Write ``content`` to ``path``, creating parent directories."""
-        target = self._writable(path, "write_text")
         if len(content.encode(encoding)) > self.max_bytes:
+            self._writable(path, "write_text")
             raise self._fail(
                 f"content is larger than max_bytes ({self.max_bytes} bytes)",
                 "write_text",
             )
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            return target.write_text(content, encoding=encoding)
+            with self._open(
+                path,
+                "write_text",
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                "w",
+                encoding=encoding,
+                writable=True,
+            ) as handle:
+                return handle.write(content)
         except OSError as exc:
             raise self._fail(f"cannot write {path!r}: {exc}", "write_text") from exc
 
     def append_text(self, path: str, content: str, *, encoding: str = "utf-8") -> int:
         """Append ``content`` to ``path``, creating it if needed."""
-        target = self._writable(path, "append_text")
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("a", encoding=encoding) as handle:
+            with self._open(
+                path,
+                "append_text",
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                "a",
+                encoding=encoding,
+                writable=True,
+            ) as handle:
                 return handle.write(content)
         except OSError as exc:
             raise self._fail(f"cannot append to {path!r}: {exc}", "append_text") from exc
 
     def list_dir(self, path: str = ".") -> list[str]:
         """List the entries of a directory, as paths relative to the root."""
-        target = self._resolve(path, "list_dir")
+        parts = self._parts(path, "list_dir")
+        prefix = PurePath(*parts) if parts else None
         try:
-            return sorted(
-                str(entry.relative_to(self.root)) for entry in target.iterdir()
-            )
+            with self._walk(parts + [""], path, "list_dir") as dir_fd:
+                entries = os.listdir(dir_fd)
         except OSError as exc:
             raise self._fail(f"cannot list {path!r}: {exc}", "list_dir") from exc
+        return sorted(
+            str(prefix / entry) if prefix is not None else entry for entry in entries
+        )
 
     def exists(self, path: str) -> bool:
-        return self._resolve(path, "exists").exists()
+        parts = self._parts(path, "exists")
+        if not parts:
+            return True
+        try:
+            with self._walk(parts, path, "exists") as dir_fd:
+                info = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError as exc:
+            raise self._fail(f"cannot stat {path!r}: {exc}", "exists") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise self._fail(
+                f"path escapes the sandbox root {self.root}: {path!r}", "exists"
+            )
+        return True
 
     def delete(self, path: str, *, missing_ok: bool = True) -> bool:
         """Delete a file. Directories are not removed."""
-        target = self._writable(path, "delete")
+        parts = self._writable(path, "delete")
+        if not parts:
+            raise self._fail(f"{path!r} is not a file", "delete")
         try:
-            target.unlink()
-            return True
-        except FileNotFoundError:
+            with self._walk(parts, path, "delete") as dir_fd:
+                os.unlink(parts[-1], dir_fd=dir_fd)
+        except (FileNotFoundError, NotADirectoryError):
             if missing_ok:
                 return False
             raise self._fail(f"no such file: {path!r}", "delete") from None
         except OSError as exc:
             raise self._fail(f"cannot delete {path!r}: {exc}", "delete") from exc
+        return True

@@ -323,6 +323,28 @@ def test_files_reject_symlink_escape(tmp_path):
         files.read_text("link.txt")
 
 
+def test_files_reject_symlinked_directory_swap(tmp_path):
+    """A checked directory swapped for a symlink cannot be followed out."""
+    outside = tmp_path.parent / "outside-dir"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_text("secret")
+    root = tmp_path / "root"
+    root.mkdir()
+    files = FileSystemIntegration(root)
+    files.write_text("notes/a.txt", "inside")
+    (root / "notes").rename(root / "notes-real")
+    (root / "notes").symlink_to(outside)
+    with pytest.raises(IntegrationError):
+        files.read_text("notes/secret.txt")
+    with pytest.raises(IntegrationError):
+        files.write_text("notes/b.txt", "escaped")
+    with pytest.raises(IntegrationError):
+        files.list_dir("notes")
+    assert files.exists("notes/secret.txt") is False
+    assert files.delete("notes/secret.txt") is False
+    assert (outside / "secret.txt").read_text() == "secret"
+
+
 def test_files_read_only(tmp_path):
     (tmp_path / "a.txt").write_text("x")
     files = FileSystemIntegration(tmp_path, read_only=True)
