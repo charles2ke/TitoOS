@@ -14,7 +14,11 @@ from .base import Integration
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
-_DIR_FD_SUPPORTED = {os.open, os.stat, os.mkdir, os.unlink} <= os.supports_dir_fd
+_SANDBOX_SUPPORTED = (
+    {os.open, os.stat, os.mkdir, os.unlink} <= os.supports_dir_fd
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+)
 
 
 class FileSystemIntegration(Integration):
@@ -48,10 +52,10 @@ class FileSystemIntegration(Integration):
         max_bytes: int = 1 << 20,
     ) -> None:
         super().__init__(name)
-        if not _DIR_FD_SUPPORTED:
+        if not _SANDBOX_SUPPORTED:
             raise ValueError(
-                "this platform cannot open files relative to a directory "
-                "descriptor, so the sandbox cannot be enforced safely"
+                "this platform lacks directory descriptors or O_NOFOLLOW, so "
+                "the sandbox cannot be enforced safely"
             )
         resolved = Path(root).expanduser().resolve()
         if not resolved.is_dir():
@@ -123,8 +127,6 @@ class FileSystemIntegration(Integration):
                 os.close(fd)
                 fd = nxt
             yield fd
-        except OSError as exc:
-            raise self._describe_oserror(exc, path, operation) from exc
         finally:
             os.close(fd)
 
