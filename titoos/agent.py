@@ -58,6 +58,21 @@ class Context:
         """The agents spawned by the running agent that still exist."""
         return self.kernel.children_of(self.agent.name)
 
+    def call(self, integration: str, operation: str, /, *args: Any, **kwargs: Any) -> Any:
+        """Invoke ``operation`` on the installed integration ``integration``.
+
+        This is how an agent touches the world outside the kernel: HTTP, the
+        filesystem, a subprocess, the clock. The call happens inside the
+        running step, so it stays inside the tick barrier like any other work.
+        Unknown integrations and operations raise
+        :class:`~titoos.integrations.base.IntegrationError`.
+        """
+        return self.kernel.integrations.call(integration, operation, *args, **kwargs)
+
+    def integration(self, name: str) -> Any:
+        """The installed integration named ``name``, for typed direct use."""
+        return self.kernel.integrations.get(name)
+
     def wait(self) -> None:
         """Block the agent until a message arrives.
 

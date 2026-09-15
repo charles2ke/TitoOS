@@ -12,6 +12,7 @@ from typing import Callable, Iterator, Sequence
 from .agent import Agent, AgentState, Context, FunctionAgent, RestartPolicy
 from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBackend
 from .bus import MessageBus
+from .integrations import Integration, IntegrationRegistry
 from .message import Message
 from .persistence import AgentFactory, AgentRecord, FinishedAgent, Snapshot
 
@@ -79,6 +80,8 @@ class Kernel:
         if backend is None:
             backend = SerialBackend() if max_workers == 1 else ThreadBackend(max_workers)
         self.bus = MessageBus()
+        #: Drivers agents use to reach the world outside the kernel.
+        self.integrations = IntegrationRegistry()
         self.max_workers = max_workers
         self.backend = backend
         self._agents: dict[str, Agent] = {}
@@ -115,6 +118,15 @@ class Kernel:
             self._agents[agent.name] = agent
             self.bus.register(agent.name)
         return agent
+
+    def install(self, integration: Integration) -> Integration:
+        """Install an integration agents can reach through ``ctx.call()``.
+
+        Integrations are kernel-level, not agent-level, so the same agent code
+        runs against a real endpoint or a fake one depending on what the
+        operator installed. They are closed by :meth:`shutdown`.
+        """
+        return self.integrations.install(integration)
 
     def children_of(self, name: str) -> tuple[Agent, ...]:
         """Every registered agent spawned by ``name``."""
@@ -412,8 +424,11 @@ class Kernel:
         return kernel
 
     def shutdown(self, wait: bool = True) -> None:
-        """Release any resources held by the execution backend."""
-        self.backend.shutdown(wait=wait)
+        """Release resources held by the backend and the installed integrations."""
+        try:
+            self.backend.shutdown(wait=wait)
+        finally:
+            self.integrations.close()
 
     def __enter__(self) -> "Kernel":
         return self

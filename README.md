@@ -65,6 +65,7 @@ class Counter(Agent):
 | `ExecutionBackend` | How a tick's agents run: `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
 | `RestartPolicy` | What happens when an agent raises: `NEVER` or `ON_FAILURE`. |
 | `Snapshot` | A consistent, serializable picture of the kernel between ticks. |
+| `Integration` | A driver for the world outside the kernel: HTTP, files, processes, time. |
 
 ## Blocking and quiescence
 
@@ -233,6 +234,85 @@ outcome, parent and saved data.
 
 Anything not returned by `save_state()` is not preserved — the default saves
 nothing.
+
+## Integrations
+
+The kernel routes messages between agents; an `Integration` is how an agent
+touches anything else. Integrations are installed on the kernel, so the same
+agent code runs against a real endpoint or a stub depending on what the
+operator installed, and every side effect of a tick is attributable to a named
+agent and a named driver:
+
+```python
+from titoos import Kernel
+from titoos.integrations import ClockIntegration, FileSystemIntegration, HttpIntegration
+
+kernel = Kernel()
+kernel.install(HttpIntegration(allowed_hosts=["api.example.com"]))
+kernel.install(FileSystemIntegration("/var/lib/titoos/work"))
+kernel.install(ClockIntegration())
+
+def reporter(ctx):
+    response = ctx.call("http", "get", "https://api.example.com/status")
+    ctx.call("files", "write_text", "status.json", response.body)
+    ctx.exit()
+
+kernel.spawn("reporter", reporter)
+kernel.run()
+```
+
+| Integration | `ctx.call(...)` operations |
+| --- | --- |
+| `HttpIntegration` | `get`, `post_json`, `request`, `describe` |
+| `FileSystemIntegration` | `read_text`, `write_text`, `append_text`, `list_dir`, `exists`, `delete`, `describe` |
+| `ShellIntegration` | `run`, `describe` |
+| `ClockIntegration` | `now`, `timestamp`, `monotonic`, `sleep`, `describe` |
+
+An integration call happens inside the running `step()`, so it is covered by
+the tick barrier like any other work: results only reach other agents through
+messages, on the next tick. A call that cannot be completed raises
+`IntegrationError`, which propagates out of `step()` like any exception — the
+agent is marked `FAILED` and its restart policy decides what happens next.
+
+### Default-deny
+
+The drivers that reach dangerous resources have no "allow everything" mode:
+
+- `HttpIntegration` requires `allowed_hosts`, accepts only `http`/`https`,
+  re-checks the allowlist on every redirect hop, and caps the response size.
+  HTTP error statuses are returned as responses, not raised — a 404 is an
+  answer, not a broken integration.
+- `FileSystemIntegration` confines every path to one `root`; absolute paths,
+  `..` traversal and symlinks pointing outside are rejected. `read_only=True`
+  disables the writing operations.
+- `ShellIntegration` requires `allowed_commands`, never uses a shell, and takes
+  argument vectors, so an agent-produced argument is data rather than syntax.
+- `ClockIntegration` caps a single `sleep()`, since a tick is a barrier.
+
+Only the operations an integration lists in `operations` are callable, so its
+surface is exactly what it advertises.
+
+### Writing your own
+
+Subclass `Integration`, name it, and list its operations. Anything an agent
+should reach — a model API, a queue, a database — becomes one:
+
+```python
+from titoos import Integration
+
+class Slack(Integration):
+    name = "slack"
+    operations = ("post_message",)
+
+    def post_message(self, channel: str, text: str) -> str:
+        ...
+```
+
+Because integrations live on the kernel, tests install a stub under the same
+name and the agents under test never notice. Integrations are runtime
+resources, not state: they are not captured by `snapshot()`, so a restored
+kernel is installed with the drivers it should use. `kernel.shutdown()` — and
+the context-manager form — closes them.
 
 ## Tests
 
