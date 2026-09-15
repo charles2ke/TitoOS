@@ -134,7 +134,7 @@ class ShellIntegration(Integration):
         unless ``check`` is set: an agent usually wants to inspect stderr.
         """
         argv = self._resolve(command)
-        limit = timeout or self.timeout
+        limit = self.timeout if timeout is None else timeout
         try:
             process = subprocess.Popen(  # noqa: S603 - argv is allowlisted and shell=False
                 argv,
@@ -232,4 +232,4 @@ class _BoundedReader(threading.Thread):
     def text(self) -> str:
         """What was captured so far, capped at ``limit`` characters."""
         with self._lock:
-            return "".join(list(self._chunks))
+            return "".join(self._chunks)

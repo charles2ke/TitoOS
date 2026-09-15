@@ -441,7 +441,11 @@ class Kernel:
             with self._lock:
                 pending, self.shutdown_thread = self.shutdown_thread, None
             if pending is not None and pending.is_alive():
+                # The deferred shutdown does the whole job; waiting for it is
+                # the wait the caller asked for, and closing again on top of
+                # it would close drivers twice.
                 pending.join()
+                return
             try:
                 self.backend.shutdown(wait=True)
             finally:

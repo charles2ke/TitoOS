@@ -141,7 +141,9 @@ class HttpIntegration(Integration):
             # Merged through urlsplit so the query lands in the query
             # component and not inside a fragment.
             query = f"{parsed.query}&{encoded}" if parsed.query else encoded
-            url = urllib.parse.urlunsplit(parsed._replace(query=query))
+            url = urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment)
+            )
         return self.request("GET", url, headers=headers)
 
     def post_json(
