@@ -287,10 +287,17 @@ The drivers that reach dangerous resources have no "allow everything" mode:
   disables the writing operations.
 - `ShellIntegration` requires `allowed_commands`, never uses a shell, and takes
   argument vectors, so an agent-produced argument is data rather than syntax.
-- `ClockIntegration` caps a single `sleep()`, since a tick is a barrier.
+  Subprocesses get an explicit minimal environment — the kernel's own is never
+  inherited — and their output is streamed into buffers bounded by
+  `max_output`.
+- `ClockIntegration` caps a single `sleep()`, since a tick is a barrier. A
+  `fixed=` clock must be timezone-aware and also freezes `monotonic()`, so a
+  fixed run is reproducible.
 
 Only the operations an integration lists in `operations` are callable, so its
-surface is exactly what it advertises.
+surface is exactly what it advertises — including through
+`ctx.integration("http")`, which hands back a restricted handle exposing those
+operations as methods and nothing else.
 
 ### Writing your own
 
@@ -312,7 +319,8 @@ Because integrations live on the kernel, tests install a stub under the same
 name and the agents under test never notice. Integrations are runtime
 resources, not state: they are not captured by `snapshot()`, so a restored
 kernel is installed with the drivers it should use. `kernel.shutdown()` — and
-the context-manager form — closes them.
+the context-manager form — closes them once the backend's workers have
+finished, so a step still inside a call never meets a closed driver.
 
 ## Tests
 

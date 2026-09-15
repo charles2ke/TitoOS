@@ -227,6 +227,7 @@ class FileSystemIntegration(Integration):
 
     def append_text(self, path: str, content: str, *, encoding: str = "utf-8") -> int:
         """Append ``content`` to ``path``, creating it if needed."""
+        addition = len(content.encode(encoding))
         try:
             with self._open(
                 path,
@@ -236,6 +237,14 @@ class FileSystemIntegration(Integration):
                 encoding=encoding,
                 writable=True,
             ) as handle:
+                # Measured on the open descriptor, so the limit holds against
+                # the file actually being appended to.
+                if os.fstat(handle.fileno()).st_size + addition > self.max_bytes:
+                    raise self._fail(
+                        f"appending to {path!r} would exceed max_bytes "
+                        f"({self.max_bytes} bytes)",
+                        "append_text",
+                    )
                 return handle.write(content)
         except OSError as exc:
             raise self._fail(f"cannot append to {path!r}: {exc}", "append_text") from exc

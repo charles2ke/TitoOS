@@ -74,6 +74,56 @@ class Integration:
         return f"<{type(self).__name__} {self.name}>"
 
 
+class IntegrationProxy:
+    """A restricted view of an integration, limited to its operations.
+
+    :meth:`Integration.call` already refuses anything outside
+    :attr:`Integration.operations`; handing an agent the driver object itself
+    would hand it every other attribute too, including ``close()``. Agents get
+    this proxy instead, so the advertised surface is the whole surface.
+    """
+
+    __slots__ = ("_integration",)
+
+    def __init__(self, integration: Integration) -> None:
+        object.__setattr__(self, "_integration", integration)
+
+    @property
+    def name(self) -> str:
+        return self._integration.name
+
+    @property
+    def operations(self) -> tuple[str, ...]:
+        return self._integration.operations
+
+    def call(self, operation: str, /, *args: Any, **kwargs: Any) -> Any:
+        """Invoke ``operation``, exactly as :meth:`Context.call` would."""
+        return self._integration.call(operation, *args, **kwargs)
+
+    def __getattr__(self, attribute: str) -> Any:
+        integration: Integration = object.__getattribute__(self, "_integration")
+        if attribute not in integration.operations:
+            raise AttributeError(
+                f"integration {integration.name!r} does not advertise "
+                f"{attribute!r}; available: "
+                f"{', '.join(integration.operations) or 'none'}"
+            )
+
+        def operation(*args: Any, **kwargs: Any) -> Any:
+            return integration.call(attribute, *args, **kwargs)
+
+        operation.__name__ = attribute
+        return operation
+
+    def __setattr__(self, attribute: str, value: Any) -> None:
+        raise AttributeError(
+            f"integration {self.name!r} is not writable through a proxy"
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"<IntegrationProxy {self.name}>"
+
+
 class IntegrationRegistry:
     """The integrations installed on a kernel, addressed by name.
 

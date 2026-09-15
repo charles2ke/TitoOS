@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from titoos import (
     ShellIntegration,
     StopReason,
 )
+from titoos.integrations.base import IntegrationProxy
 
 
 def interpreter_name() -> str:
@@ -74,18 +75,38 @@ def test_agent_calls_an_installed_integration():
     assert kernel.stop_reason is StopReason.FINISHED
 
 
-def test_context_integration_returns_the_object():
+def test_context_integration_returns_a_restricted_proxy():
     kernel = Kernel()
     echo = kernel.install(Echo())
-    found = []
+    said = []
+    denied = []
 
     def caller(ctx):
-        found.append(ctx.integration("echo"))
+        handle = ctx.integration("echo")
+        assert handle is not echo
+        assert handle.name == "echo"
+        said.append(handle.say("hi"))
+        for attribute in ("hidden", "close", "calls"):
+            try:
+                getattr(handle, attribute)
+            except AttributeError:
+                denied.append(attribute)
         ctx.exit()
 
     kernel.spawn("caller", caller)
     kernel.run(max_ticks=3)
-    assert found == [echo]
+    assert said == ["echo:hi"]
+    assert denied == ["hidden", "close", "calls"]
+    assert echo.closed is False
+
+
+def test_integration_proxy_is_not_writable():
+    kernel = Kernel()
+    kernel.install(Echo())
+    proxy = IntegrationProxy(kernel.integrations.get("echo"))
+    assert proxy.operations == ("say", "describe")
+    with pytest.raises(AttributeError):
+        proxy.say = lambda text: text
 
 
 def test_duplicate_names_are_rejected():
@@ -134,6 +155,39 @@ def test_shutdown_closes_integrations():
     assert echo.closed
 
 
+def test_shutdown_without_waiting_closes_after_the_workers():
+    """A step still inside ctx.call() must not meet a closed driver."""
+    kernel = Kernel(max_workers=2)
+    echo = kernel.install(Echo())
+    started = threading.Event()
+    release = threading.Event()
+    seen: list[bool] = []
+
+    def slow(ctx):
+        started.set()
+        release.wait(5)
+        seen.append(echo.closed)
+        ctx.exit()
+
+    def quick(ctx):
+        ctx.exit()
+
+    kernel.spawn("slow", slow)
+    kernel.spawn("quick", quick)
+    runner = threading.Thread(target=kernel.run, kwargs={"max_ticks": 3}, daemon=True)
+    runner.start()
+    assert started.wait(5)
+
+    kernel.shutdown(wait=False)
+    assert echo.closed is False
+    release.set()
+    runner.join(timeout=5)
+    assert kernel.shutdown_thread is not None
+    kernel.shutdown_thread.join(timeout=5)
+    assert seen == [False]
+    assert echo.closed
+
+
 def test_uninstall_closes_and_removes():
     kernel = Kernel()
     echo = kernel.install(Echo())
@@ -177,6 +231,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - http.server API
         if self.path.startswith("/boom"):
             self.send_error(500, "boom")
+            return
+        if self.path.startswith("/bounce"):
+            self.send_response(302)
+            self.send_header("Location", "/boom")
+            self.end_headers()
             return
         if self.path.startswith("/elsewhere"):
             self.send_response(302)
@@ -231,6 +290,30 @@ def test_http_error_status_is_returned_not_raised(http_server):
     response = http.get(f"{http_server}/boom")
     assert response.status == 500
     assert not response.ok
+
+
+def test_http_error_after_a_redirect_reports_the_final_url(http_server):
+    http = HttpIntegration(allowed_hosts=["127.0.0.1"])
+    response = http.get(f"{http_server}/bounce")
+    assert response.status == 500
+    assert response.url == f"{http_server}/boom"
+
+
+def test_http_params_survive_a_fragment(http_server):
+    http = HttpIntegration(allowed_hosts=["127.0.0.1"])
+    response = http.get(f"{http_server}/hello#frag", params={"x": "1"})
+    assert response.json() == {"path": "/hello?x=1"}
+
+    merged = http.get(f"{http_server}/hello?a=1#frag", params={"x": "1"})
+    assert merged.json() == {"path": "/hello?a=1&x=1"}
+
+
+def test_http_malformed_url_raises_an_integration_error():
+    http = HttpIntegration(allowed_hosts=["127.0.0.1"])
+    with pytest.raises(IntegrationError, match="malformed URL"):
+        http.get("http://[::1")
+    with pytest.raises(IntegrationError, match="malformed URL"):
+        http.get("http://[::1", params={"x": "1"})
 
 
 def test_http_rejects_hosts_outside_the_allowlist():
@@ -364,6 +447,16 @@ def test_files_enforce_max_bytes(tmp_path):
         files.read_text("b.txt")
 
 
+def test_files_append_enforces_max_bytes(tmp_path):
+    files = FileSystemIntegration(tmp_path, max_bytes=8)
+    files.write_text("a.txt", "12345")
+    with pytest.raises(IntegrationError, match="max_bytes"):
+        files.append_text("a.txt", "6789")
+    assert files.read_text("a.txt") == "12345"
+    files.append_text("a.txt", "678")
+    assert files.read_text("a.txt") == "12345678"
+
+
 def test_files_missing_root(tmp_path):
     with pytest.raises(ValueError, match="not an existing directory"):
         FileSystemIntegration(tmp_path / "nope")
@@ -418,6 +511,43 @@ def test_shell_times_out():
         shell.run([sys.executable, "-c", "import time; time.sleep(5)"])
 
 
+def test_shell_does_not_inherit_the_parent_environment(monkeypatch):
+    monkeypatch.setenv("TITOOS_TEST_SECRET", "hunter2")
+    shell = ShellIntegration(allowed_commands=[interpreter_name()])
+    result = shell.run(
+        [sys.executable, "-c", "import os; print(os.environ.get('TITOOS_TEST_SECRET'))"]
+    )
+    assert result.stdout.strip() == "None"
+
+
+def test_shell_env_can_be_given_explicitly():
+    shell = ShellIntegration(
+        allowed_commands=[interpreter_name()], env={"TITOOS_TEST_VALUE": "42"}
+    )
+    result = shell.run(
+        [sys.executable, "-c", "import os; print(os.environ['TITOOS_TEST_VALUE'])"]
+    )
+    assert result.stdout.strip() == "42"
+
+
+def test_shell_output_is_bounded_while_streaming():
+    shell = ShellIntegration(allowed_commands=[interpreter_name()], max_output=32)
+    result = shell.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "for _ in range(2000):\n"
+            "    sys.stdout.write('o' * 1000)\n"
+            "    sys.stderr.write('e' * 1000)\n",
+        ],
+        timeout=30,
+    )
+    assert result.ok
+    assert result.stdout == "o" * 32
+    assert result.stderr == "e" * 32
+
+
 def test_shell_requires_an_allowlist():
     with pytest.raises(ValueError, match="allowed_commands"):
         ShellIntegration(allowed_commands=[])
@@ -452,6 +582,25 @@ def test_frozen_clock_is_deterministic_and_never_sleeps():
     assert clock.now() == fixed == clock.now()
     assert clock.timestamp() == fixed.timestamp()
     assert clock.sleep(3600) == 5.0
+
+
+def test_frozen_clock_requires_an_aware_datetime():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ClockIntegration(fixed=datetime(2030, 1, 1))
+
+
+def test_frozen_clock_normalizes_to_utc():
+    offset = timezone(timedelta(hours=2))
+    clock = ClockIntegration(fixed=datetime(2030, 1, 1, 12, tzinfo=offset))
+    assert clock.now() == datetime(2030, 1, 1, 10, tzinfo=timezone.utc)
+    assert clock.now().tzinfo is timezone.utc
+
+
+def test_frozen_clock_monotonic_is_deterministic():
+    clock = ClockIntegration(fixed=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    assert clock.monotonic() == 0.0
+    clock.sleep(2)
+    assert clock.monotonic() == 2.0
 
 
 def test_clock_sleep_is_capped():

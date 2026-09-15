@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable
 
+from .integrations.base import IntegrationProxy
 from .message import Message
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -69,9 +70,15 @@ class Context:
         """
         return self.kernel.integrations.call(integration, operation, *args, **kwargs)
 
-    def integration(self, name: str) -> Any:
-        """The installed integration named ``name``, for typed direct use."""
-        return self.kernel.integrations.get(name)
+    def integration(self, name: str) -> "IntegrationProxy":
+        """A restricted handle on the installed integration named ``name``.
+
+        The handle exposes only the operations the integration advertises, as
+        methods, so ``ctx.integration("http").get(url)`` is another spelling of
+        ``ctx.call("http", "get", url)`` and nothing more: an agent cannot
+        reach an unadvertised method or close a resource other agents share.
+        """
+        return IntegrationProxy(self.kernel.integrations.get(name))
 
     def wait(self) -> None:
         """Block the agent until a message arrives.

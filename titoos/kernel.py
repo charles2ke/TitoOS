@@ -88,6 +88,9 @@ class Kernel:
         self._tick = 0
         self.errors: list[tuple[str, BaseException]] = []
         self.stop_reason: StopReason | None = None
+        #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
+        #: the workers are done.
+        self.shutdown_thread: threading.Thread | None = None
         self._lock = threading.RLock()
 
     @property
@@ -424,9 +427,31 @@ class Kernel:
         return kernel
 
     def shutdown(self, wait: bool = True) -> None:
-        """Release resources held by the backend and the installed integrations."""
+        """Release resources held by the backend and the installed integrations.
+
+        Integrations are always closed after the workers of the backend have
+        finished: a step still inside ``ctx.call()`` would otherwise race with
+        a driver closing under it. With ``wait=False`` the caller returns
+        immediately and that wait-then-close happens on a background thread,
+        whose handle is :attr:`shutdown_thread` for anyone that needs to join.
+        """
+        if wait:
+            try:
+                self.backend.shutdown(wait=True)
+            finally:
+                self.integrations.close()
+            return
+        thread = threading.Thread(
+            target=self._shutdown_blocking,
+            name=f"titoos-shutdown-{id(self):x}",
+            daemon=True,
+        )
+        self.shutdown_thread = thread
+        thread.start()
+
+    def _shutdown_blocking(self) -> None:
         try:
-            self.backend.shutdown(wait=wait)
+            self.backend.shutdown(wait=True)
         finally:
             self.integrations.close()
 

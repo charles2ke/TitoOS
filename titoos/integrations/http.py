@@ -100,7 +100,10 @@ class HttpIntegration(Integration):
     def _check(self, url: str, method: str, operation: str) -> str:
         if method not in _ALLOWED_METHODS:
             raise self._fail(f"unsupported HTTP method: {method!r}", operation)
-        parsed = urllib.parse.urlsplit(url)
+        try:
+            parsed = urllib.parse.urlsplit(url)
+        except ValueError as exc:
+            raise self._fail(f"malformed URL {url!r}: {exc}", operation) from exc
         scheme = parsed.scheme.lower()
         if scheme not in _ALLOWED_SCHEMES:
             raise self._fail(
@@ -130,8 +133,15 @@ class HttpIntegration(Integration):
     ) -> HttpResponse:
         """GET ``url``, optionally with query ``params``."""
         if params:
-            separator = "&" if urllib.parse.urlsplit(url).query else "?"
-            url = f"{url}{separator}{urllib.parse.urlencode(params)}"
+            try:
+                parsed = urllib.parse.urlsplit(url)
+            except ValueError as exc:
+                raise self._fail(f"malformed URL {url!r}: {exc}", "get") from exc
+            encoded = urllib.parse.urlencode(params)
+            # Merged through urlsplit so the query lands in the query
+            # component and not inside a fragment.
+            query = f"{parsed.query}&{encoded}" if parsed.query else encoded
+            url = urllib.parse.urlunsplit(parsed._replace(query=query))
         return self.request("GET", url, headers=headers)
 
     def post_json(
@@ -178,7 +188,9 @@ class HttpIntegration(Integration):
         except urllib.error.HTTPError as exc:  # an answer, not a failure
             payload = exc.read(self.max_bytes + 1)
             status = exc.code
-            final_url = safe_url
+            # The error may come from the last hop of a redirect chain, so
+            # report the URL that actually answered.
+            final_url = getattr(exc, "url", None) or safe_url
             response_headers = dict(exc.headers.items()) if exc.headers else {}
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise self._fail(f"{method} {safe_url} failed: {exc}", "request") from exc

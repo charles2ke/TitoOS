@@ -7,6 +7,7 @@ a frozen clock and get the same run every time.
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -36,8 +37,19 @@ class ClockIntegration(Integration):
         if max_sleep < 0:
             raise ValueError("max_sleep must not be negative")
         self.max_sleep = max_sleep
+        if fixed is not None:
+            if fixed.tzinfo is None or fixed.utcoffset() is None:
+                raise ValueError(
+                    "fixed must be timezone-aware; a naive datetime has no "
+                    "defined instant"
+                )
+            fixed = fixed.astimezone(timezone.utc)
         #: When set, the clock is frozen at this instant and never sleeps.
         self.fixed = fixed
+        #: Deterministic stand-in for the process clock while frozen. Advanced
+        #: by :meth:`sleep`, so measuring a slept duration still works.
+        self._elapsed = 0.0
+        self._lock = threading.Lock()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -57,7 +69,14 @@ class ClockIntegration(Integration):
         return self.now().timestamp()
 
     def monotonic(self) -> float:
-        """A monotonic clock reading, suitable for measuring durations."""
+        """A monotonic clock reading, suitable for measuring durations.
+
+        While frozen this counts the time the clock was asked to sleep rather
+        than the host's process clock, so a fixed run stays reproducible.
+        """
+        if self.fixed is not None:
+            with self._lock:
+                return self._elapsed
         return time.monotonic()
 
     def sleep(self, seconds: float) -> float:
@@ -65,6 +84,9 @@ class ClockIntegration(Integration):
         if seconds < 0:
             raise self._fail("cannot sleep for a negative duration", "sleep")
         delay = min(seconds, self.max_sleep)
-        if self.fixed is None and delay:
+        if self.fixed is not None:
+            with self._lock:
+                self._elapsed += delay
+        elif delay:
             time.sleep(delay)
         return delay
