@@ -209,6 +209,9 @@ class _BoundedReader(threading.Thread):
         self._limit = limit
         self._chunks: list[str] = []
         self._kept = 0
+        # A join that times out leaves this thread running, so the buffer is
+        # shared with the caller reading `text`.
+        self._lock = threading.Lock()
 
     def run(self) -> None:
         try:
@@ -216,15 +219,17 @@ class _BoundedReader(threading.Thread):
                 chunk = self._stream.read(_CHUNK)
                 if not chunk:
                     break
-                room = self._limit - self._kept
-                if room > 0:
-                    kept = chunk[:room]
-                    self._chunks.append(kept)
-                    self._kept += len(kept)
+                with self._lock:
+                    room = self._limit - self._kept
+                    if room > 0:
+                        kept = chunk[:room]
+                        self._chunks.append(kept)
+                        self._kept += len(kept)
         except (OSError, ValueError):  # the pipe was closed under us
             pass
 
     @property
     def text(self) -> str:
         """What was captured so far, capped at ``limit`` characters."""
-        return "".join(self._chunks)
+        with self._lock:
+            return "".join(list(self._chunks))

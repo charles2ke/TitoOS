@@ -438,7 +438,8 @@ class Kernel:
         no-op rather than a second concurrent close.
         """
         if wait:
-            pending = self.shutdown_thread
+            with self._lock:
+                pending, self.shutdown_thread = self.shutdown_thread, None
             if pending is not None and pending.is_alive():
                 pending.join()
             try:

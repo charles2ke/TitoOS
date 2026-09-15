@@ -227,7 +227,14 @@ class FileSystemIntegration(Integration):
 
     def append_text(self, path: str, content: str, *, encoding: str = "utf-8") -> int:
         """Append ``content`` to ``path``, creating it if needed."""
+        self._writable(path, "append_text")
         addition = len(content.encode(encoding))
+        # Checked before opening, so a rejected append never creates the file.
+        if addition > self.max_bytes:
+            raise self._fail(
+                f"content is larger than max_bytes ({self.max_bytes} bytes)",
+                "append_text",
+            )
         try:
             with self._open(
                 path,
