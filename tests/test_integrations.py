@@ -179,6 +179,9 @@ def test_shutdown_without_waiting_closes_after_the_workers():
     assert started.wait(5)
 
     kernel.shutdown(wait=False)
+    first = kernel.shutdown_thread
+    kernel.shutdown(wait=False)  # a second call must not close twice
+    assert kernel.shutdown_thread is first
     assert echo.closed is False
     release.set()
     runner.join(timeout=5)

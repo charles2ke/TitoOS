@@ -22,6 +22,11 @@ DEFAULT_ENV: Mapping[str, str] = {
 #: Size of a single read while draining a child's output.
 _CHUNK = 8192
 
+#: How long to wait for a drain thread after the child is gone. A grandchild
+#: that inherited the pipes can hold them open forever, and the timeout of
+#: :meth:`ShellIntegration.run` has to mean something.
+_DRAIN_GRACE = 1.0
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -169,7 +174,7 @@ class ShellIntegration(Integration):
                 process.wait()
             finally:
                 for reader in readers:
-                    reader.join()
+                    reader.join(timeout=_DRAIN_GRACE)
         if timed_out:
             raise self._fail(
                 f"command timed out after {limit}s: {' '.join(argv)}", "run"
@@ -221,4 +226,5 @@ class _BoundedReader(threading.Thread):
 
     @property
     def text(self) -> str:
+        """What was captured so far, capped at ``limit`` characters."""
         return "".join(self._chunks)

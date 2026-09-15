@@ -434,20 +434,29 @@ class Kernel:
         a driver closing under it. With ``wait=False`` the caller returns
         immediately and that wait-then-close happens on a background thread,
         whose handle is :attr:`shutdown_thread` for anyone that needs to join.
+        A second ``wait=False`` call while that thread is still running is a
+        no-op rather than a second concurrent close.
         """
         if wait:
+            pending = self.shutdown_thread
+            if pending is not None and pending.is_alive():
+                pending.join()
             try:
                 self.backend.shutdown(wait=True)
             finally:
                 self.integrations.close()
             return
-        thread = threading.Thread(
-            target=self._shutdown_blocking,
-            name=f"titoos-shutdown-{id(self):x}",
-            daemon=True,
-        )
-        self.shutdown_thread = thread
-        thread.start()
+        with self._lock:
+            pending = self.shutdown_thread
+            if pending is not None and pending.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._shutdown_blocking,
+                name=f"titoos-shutdown-{id(self):x}",
+                daemon=True,
+            )
+            self.shutdown_thread = thread
+            thread.start()
 
     def _shutdown_blocking(self) -> None:
         try:
