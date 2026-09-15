@@ -334,14 +334,16 @@ def test_files_reject_symlinked_directory_swap(tmp_path):
     files.write_text("notes/a.txt", "inside")
     (root / "notes").rename(root / "notes-real")
     (root / "notes").symlink_to(outside)
-    with pytest.raises(IntegrationError):
+    with pytest.raises(IntegrationError, match="escapes the sandbox"):
         files.read_text("notes/secret.txt")
-    with pytest.raises(IntegrationError):
+    with pytest.raises(IntegrationError, match="escapes the sandbox"):
         files.write_text("notes/b.txt", "escaped")
-    with pytest.raises(IntegrationError):
+    with pytest.raises(IntegrationError, match="escapes the sandbox"):
         files.list_dir("notes")
-    assert files.exists("notes/secret.txt") is False
-    assert files.delete("notes/secret.txt") is False
+    with pytest.raises(IntegrationError, match="escapes the sandbox"):
+        files.exists("notes/secret.txt")
+    with pytest.raises(IntegrationError, match="escapes the sandbox"):
+        files.delete("notes/secret.txt")
     assert (outside / "secret.txt").read_text() == "secret"
 
 

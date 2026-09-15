@@ -89,24 +89,37 @@ class FileSystemIntegration(Integration):
 
     @contextmanager
     def _walk(
-        self, parts: list[str], path: str, operation: str, *, create: bool = False
+        self,
+        parts: list[str],
+        path: str,
+        operation: str,
+        *,
+        create: bool = False,
+        include_last: bool = False,
     ) -> Iterator[int]:
         """Yield a descriptor for the directory holding ``parts[-1]``.
 
         Each component is opened relative to the descriptor of its parent with
         ``O_NOFOLLOW``, so the sandbox cannot be escaped by swapping a checked
-        directory for a symlink between the check and the operation.
+        directory for a symlink between the check and the operation. With
+        ``include_last`` the final component is opened as a directory too.
         """
         flags = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+        components = parts if include_last else parts[:-1]
         fd = os.open(self.root, flags)
         try:
-            for part in parts[:-1]:
+            for part in components:
                 if create:
                     try:
                         os.mkdir(part, dir_fd=fd)
                     except FileExistsError:
                         pass
-                nxt = os.open(part, flags | _O_NOFOLLOW, dir_fd=fd)
+                try:
+                    nxt = os.open(part, flags | _O_NOFOLLOW, dir_fd=fd)
+                except OSError as exc:
+                    raise self._describe_oserror(
+                        exc, path, operation, part=part, dir_fd=fd
+                    ) from exc
                 os.close(fd)
                 fd = nxt
             yield fd
@@ -115,9 +128,27 @@ class FileSystemIntegration(Integration):
         finally:
             os.close(fd)
 
-    def _describe_oserror(self, exc: OSError, path: str, operation: str) -> Exception:
+    def _describe_oserror(
+        self,
+        exc: OSError,
+        path: str,
+        operation: str,
+        *,
+        part: str | None = None,
+        dir_fd: int | None = None,
+    ) -> Exception:
         """Translate a no-follow failure into a sandbox error, else pass through."""
-        if exc.errno == errno.ELOOP:
+        escaped = exc.errno == errno.ELOOP
+        if not escaped and exc.errno == errno.ENOTDIR and part is not None:
+            # Linux reports ENOTDIR rather than ELOOP when O_DIRECTORY and
+            # O_NOFOLLOW meet a symlink; tell the two cases apart.
+            try:
+                escaped = stat.S_ISLNK(
+                    os.stat(part, dir_fd=dir_fd, follow_symlinks=False).st_mode
+                )
+            except OSError:
+                escaped = False
+        if escaped:
             return self._fail(
                 f"path escapes the sandbox root {self.root}: {path!r}", operation
             )
@@ -155,6 +186,7 @@ class FileSystemIntegration(Integration):
                 raise
             with handle:
                 yield handle
+
     def read_text(self, path: str, *, encoding: str = "utf-8") -> str:
         """Return the contents of ``path``."""
         try:
@@ -172,8 +204,8 @@ class FileSystemIntegration(Integration):
 
     def write_text(self, path: str, content: str, *, encoding: str = "utf-8") -> int:
         """Write ``content`` to ``path``, creating parent directories."""
+        self._writable(path, "write_text")
         if len(content.encode(encoding)) > self.max_bytes:
-            self._writable(path, "write_text")
             raise self._fail(
                 f"content is larger than max_bytes ({self.max_bytes} bytes)",
                 "write_text",
@@ -211,7 +243,7 @@ class FileSystemIntegration(Integration):
         parts = self._parts(path, "list_dir")
         prefix = PurePath(*parts) if parts else None
         try:
-            with self._walk(parts + [""], path, "list_dir") as dir_fd:
+            with self._walk(parts, path, "list_dir", include_last=True) as dir_fd:
                 entries = os.listdir(dir_fd)
         except OSError as exc:
             raise self._fail(f"cannot list {path!r}: {exc}", "list_dir") from exc
