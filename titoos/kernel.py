@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +22,18 @@ from .persistence import AgentFactory, AgentRecord, FinishedAgent, Snapshot
 CHILD_FAILED = "titoos.child_failed"
 
 _FINISHED = (AgentState.DONE, AgentState.FAILED)
+_logger = logging.getLogger(__name__)
+
+
+class _PlatformAdapterCloseError(RuntimeError):
+    """Raised after every platform adapter has been given a chance to close."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        self.errors = tuple(errors)
+        super().__init__(
+            "failed to close platform adapter(s): "
+            + "; ".join(str(error) for error in errors)
+        )
 
 
 class StopReason(str, Enum):
@@ -427,7 +440,7 @@ class Kernel:
         return kernel
 
     def shutdown(self, wait: bool = True) -> None:
-        """Release resources held by the backend and the installed integrations.
+        """Release resources held by the backend, integrations, and adapters.
 
         Integrations are always closed after the workers of the backend have
         finished: a step still inside ``ctx.call()`` would otherwise race with
@@ -448,8 +461,11 @@ class Kernel:
                 return
             try:
                 self.backend.shutdown(wait=True)
-            finally:
-                self.integrations.close()
+            except BaseException:
+                self._close_resources(suppress_errors=True)
+                raise
+            else:
+                self._close_resources()
             return
         with self._lock:
             pending = self.shutdown_thread
@@ -466,8 +482,51 @@ class Kernel:
     def _shutdown_blocking(self) -> None:
         try:
             self.backend.shutdown(wait=True)
-        finally:
+        except BaseException:
+            self._close_resources(suppress_errors=True)
+            raise
+        else:
+            self._close_resources()
+
+    def _close_resources(self, *, suppress_errors: bool = False) -> None:
+        if suppress_errors:
+            for close in (self.integrations.close, self._close_platform_adapters):
+                try:
+                    close()
+                except BaseException:
+                    _logger.exception("failed to close kernel resources")
+            return
+        try:
             self.integrations.close()
+        except BaseException:
+            try:
+                self._close_platform_adapters()
+            except Exception:
+                _logger.exception("failed to close platform adapters")
+            raise
+        self._close_platform_adapters()
+
+    def _close_platform_adapters(self) -> None:
+        """Close shared adapters once per shutdown and raise after all attempts."""
+        with self._lock:
+            adapters: dict[int, object] = {}
+            for agent in self._agents.values():
+                adapter = getattr(agent, "adapter", None)
+                adapter_id = id(adapter)
+                if (
+                    callable(getattr(adapter, "close", None))
+                    and adapter_id not in adapters
+                ):
+                    adapters[adapter_id] = adapter
+        errors: list[Exception] = []
+        for adapter in adapters.values():
+            try:
+                adapter.close()
+            except Exception as exc:
+                errors.append(exc)
+                _logger.exception("failed to close platform adapter %r", adapter)
+        if errors:
+            raise _PlatformAdapterCloseError(errors) from errors[0]
 
     def __enter__(self) -> "Kernel":
         return self
