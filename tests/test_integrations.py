@@ -568,6 +568,16 @@ def test_shell_rejects_an_unresolvable_allowlist_entry():
         ShellIntegration(allowed_commands=["definitely-not-a-real-binary"])
 
 
+def test_shell_resolves_allowlist_entries_with_their_original_case(tmp_path, monkeypatch):
+    executable = tmp_path / "MyTool"
+    executable.write_text("#!/bin/sh\necho original-case\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    shell = ShellIntegration(allowed_commands=["MyTool"])
+    result = shell.run(["mytool"])
+    assert result.stdout.strip() == "original-case"
+
+
 def test_shell_rejects_a_path_in_the_allowlist(tmp_path):
     with pytest.raises(ValueError, match="bare command names"):
         ShellIntegration(allowed_commands=[str(tmp_path / "git")])

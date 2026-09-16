@@ -37,7 +37,10 @@ def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
     Both are refused here rather than at the first call.
     """
     resolved: dict[str, str] = {}
-    for name in sorted(names):
+    for raw_name in names:
+        name = raw_name.strip()
+        if not name:
+            continue
         if name != Path(name).name or "/" in name or "\\" in name:
             raise ValueError(
                 "allowed_commands entries must be bare command names, not "
@@ -46,7 +49,7 @@ def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
         executable = shutil.which(name)
         if executable is None:
             raise ValueError(f"allowed command not found on PATH: {name!r}")
-        resolved[name] = str(Path(executable).resolve())
+        resolved[name.lower()] = str(Path(executable).resolve())
     return resolved
 
 
@@ -104,7 +107,7 @@ class ShellIntegration(Integration):
         # Resolving the allowlist once, here, is what makes it an allowlist of
         # programs rather than of names: at run time nothing is looked up from
         # agent input, so an agent-written file cannot claim an allowed name.
-        self._executables = _resolve_allowlist(self.allowed_commands)
+        self._executables = _resolve_allowlist(allowed_commands)
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_output <= 0:
