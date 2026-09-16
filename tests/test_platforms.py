@@ -8,6 +8,7 @@ from titoos import (
     AsyncBackend,
     FunctionAgent,
     Kernel,
+    RestartPolicy,
     SerialBackend,
     StopReason,
     ThreadBackend,
@@ -328,8 +329,6 @@ def test_a_failed_seed_is_retried_after_a_restart():
         def invoke(self, request, turn):
             self.requests.append(request)
             raise ValueError("model exploded")
-
-    from titoos import RestartPolicy
 
     adapter = Broken()
     kernel = Kernel()
