@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import inspect
 import logging
+import sys
 import threading
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
@@ -93,7 +95,10 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
-        self._closed_adapters: dict[int, object] = {}
+        self._closed_adapters: weakref.WeakValueDictionary[int, object] = (
+            weakref.WeakValueDictionary()
+        )
+        self._strong_closed_adapters: list[object] = []
         self._lock = threading.RLock()
 
     @property
@@ -484,6 +489,9 @@ class Kernel:
                 if (
                     callable(getattr(adapter, "close", None))
                     and self._closed_adapters.get(adapter_id) is not adapter
+                    and all(
+                        adapter is not item for item in self._strong_closed_adapters
+                    )
                     and adapters.get(adapter_id) is not adapter
                 ):
                     adapters[adapter_id] = adapter
@@ -496,10 +504,13 @@ class Kernel:
                 _logger.exception("failed to close platform adapter %r", adapter)
             else:
                 with self._lock:
-                    self._closed_adapters[adapter_id] = adapter
+                    try:
+                        self._closed_adapters[adapter_id] = adapter
+                    except TypeError:
+                        self._strong_closed_adapters.append(adapter)
         if errors:
-            for error, next_error in zip(errors, errors[1:]):
-                error.__context__ = next_error
+            if len(errors) > 1 and sys.version_info >= (3, 11):
+                raise ExceptionGroup("failed to close platform adapters", errors)
             raise errors[0]
 
     def __enter__(self) -> "Kernel":
