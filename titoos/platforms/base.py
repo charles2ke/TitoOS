@@ -356,7 +356,6 @@ class PlatformAgent(Agent):
             ctx.wait()
             return None
         seed = None if self._seeded else self.seed
-        self._seeded = True
         return PlatformTurn(
             agent=self.name,
             tick=ctx.tick,
@@ -373,6 +372,7 @@ class PlatformAgent(Agent):
             raise self._error("from_platform", exc) from exc
         for reply in replies:
             self._dispatch(ctx, reply, turn)
+        self._seeded = True
         self.turns += 1
         if self.max_turns is not None and self.turns >= self.max_turns:
             ctx.exit()

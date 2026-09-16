@@ -317,6 +317,32 @@ def test_a_platform_failure_is_a_platform_error_and_is_supervised():
     assert "model exploded" in str(error)
 
 
+def test_a_failed_seed_is_retried_after_a_restart():
+    class Broken(PlatformAdapter):
+        name = "broken"
+
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        def invoke(self, request, turn):
+            self.requests.append(request)
+            raise ValueError("model exploded")
+
+    from titoos import RestartPolicy
+
+    adapter = Broken()
+    kernel = Kernel()
+    agent = adapter.agent("assistant", seed="go")
+    agent.restart_policy = RestartPolicy.ON_FAILURE
+    agent.max_restarts = 2
+    kernel.register(agent)
+    kernel.run(max_ticks=10)
+
+    assert adapter.requests == ["go", "go", "go"]
+    assert agent.restarts == 2
+
+
 def test_a_sync_agent_refuses_an_awaitable_result():
     kernel = Kernel()
     kernel.register(
