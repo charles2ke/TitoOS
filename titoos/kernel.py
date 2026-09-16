@@ -93,7 +93,7 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
-        self._closed_adapters: list[object] = []
+        self._closed_adapters: dict[int, object] = {}
         self._lock = threading.RLock()
 
     @property
@@ -475,18 +475,20 @@ class Kernel:
             self._close_platform_adapters()
 
     def _close_platform_adapters(self) -> None:
+        """Close each adapter once, retry failed closes, and finish all closes."""
         with self._lock:
-            adapters: list[object] = []
+            adapters: dict[int, object] = {}
             for agent in self._agents.values():
                 adapter = getattr(agent, "adapter", None)
+                adapter_id = id(adapter)
                 if (
                     callable(getattr(adapter, "close", None))
-                    and all(adapter is not item for item in self._closed_adapters)
-                    and all(adapter is not item for item in adapters)
+                    and self._closed_adapters.get(adapter_id) is not adapter
+                    and adapters.get(adapter_id) is not adapter
                 ):
-                    adapters.append(adapter)
+                    adapters[adapter_id] = adapter
         errors: list[Exception] = []
-        for adapter in adapters:
+        for adapter_id, adapter in adapters.items():
             try:
                 adapter.close()
             except Exception as exc:
@@ -494,8 +496,10 @@ class Kernel:
                 _logger.exception("failed to close platform adapter %r", adapter)
             else:
                 with self._lock:
-                    self._closed_adapters.append(adapter)
+                    self._closed_adapters[adapter_id] = adapter
         if errors:
+            for error, next_error in zip(errors, errors[1:]):
+                error.__context__ = next_error
             raise errors[0]
 
     def __enter__(self) -> "Kernel":
