@@ -40,7 +40,7 @@ def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
     for raw_name in sorted(names):
         name = raw_name.strip()
         if not name:
-            continue
+            raise ValueError("allowed_commands entries must not be blank")
         if name != Path(name).name or "/" in name or "\\" in name:
             raise ValueError(
                 "allowed_commands entries must be bare command names, not "

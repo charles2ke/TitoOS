@@ -568,6 +568,11 @@ def test_shell_rejects_an_unresolvable_allowlist_entry():
         ShellIntegration(allowed_commands=["definitely-not-a-real-binary"])
 
 
+def test_shell_rejects_a_blank_allowlist_entry():
+    with pytest.raises(ValueError, match="must not be blank"):
+        ShellIntegration(allowed_commands=[interpreter_name(), " "])
+
+
 def test_shell_resolves_allowlist_entries_with_their_original_case(tmp_path, monkeypatch):
     executable = tmp_path / "MyTool"
     executable.write_text("#!/bin/sh\necho original-case\n")
