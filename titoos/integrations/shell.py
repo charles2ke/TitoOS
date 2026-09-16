@@ -37,7 +37,7 @@ def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
     Both are refused here rather than at the first call.
     """
     resolved: dict[str, str] = {}
-    for raw_name in names:
+    for raw_name in sorted(names):
         name = raw_name.strip()
         if not name:
             continue
