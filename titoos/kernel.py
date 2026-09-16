@@ -484,14 +484,20 @@ class Kernel:
                     and agent.adapter not in self._closed_adapters
                 )
             }
-            self._closed_adapters.update(adapters)
-        error: BaseException | None = None
+        error: Exception | None = None
+        last_error: Exception | None = None
         for adapter in adapters:
             try:
                 adapter.close()
-            except BaseException as exc:
+            except Exception as exc:
                 if error is None:
                     error = exc
+                elif last_error is not None:
+                    last_error.__context__ = exc
+                last_error = exc
+            else:
+                with self._lock:
+                    self._closed_adapters.add(adapter)
         if error is not None:
             raise error
 

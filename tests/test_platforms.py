@@ -435,15 +435,21 @@ def test_shutdown_closes_shared_adapter_once():
 def test_shutdown_closes_other_adapters_when_one_close_fails():
     class BrokenClosePlatform(FakePlatform):
         def close(self):
-            raise RuntimeError("close failed")
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("close failed")
 
+    broken = BrokenClosePlatform()
+    broken.calls = 0
     adapter = FakePlatform()
     kernel = Kernel()
-    kernel.register(BrokenClosePlatform().agent("broken"))
+    kernel.register(broken.agent("broken"))
     kernel.register(adapter.agent("other"))
     with pytest.raises(RuntimeError, match="close failed"):
         kernel.shutdown()
     assert adapter.closed
+    kernel.shutdown()
+    assert broken.calls == 2
 
 
 def test_async_platform_agents_are_rejected_by_the_serial_backend():
