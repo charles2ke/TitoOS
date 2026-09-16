@@ -12,6 +12,7 @@ from typing import Callable, Iterator, Sequence
 from .agent import Agent, AgentState, Context, FunctionAgent, RestartPolicy
 from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBackend
 from .bus import MessageBus
+from .integrations import Integration, IntegrationRegistry
 from .message import Message
 from .persistence import AgentFactory, AgentRecord, FinishedAgent, Snapshot
 
@@ -79,12 +80,17 @@ class Kernel:
         if backend is None:
             backend = SerialBackend() if max_workers == 1 else ThreadBackend(max_workers)
         self.bus = MessageBus()
+        #: Drivers agents use to reach the world outside the kernel.
+        self.integrations = IntegrationRegistry()
         self.max_workers = max_workers
         self.backend = backend
         self._agents: dict[str, Agent] = {}
         self._tick = 0
         self.errors: list[tuple[str, BaseException]] = []
         self.stop_reason: StopReason | None = None
+        #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
+        #: the workers are done.
+        self.shutdown_thread: threading.Thread | None = None
         self._lock = threading.RLock()
 
     @property
@@ -115,6 +121,15 @@ class Kernel:
             self._agents[agent.name] = agent
             self.bus.register(agent.name)
         return agent
+
+    def install(self, integration: Integration) -> Integration:
+        """Install an integration agents can reach through ``ctx.call()``.
+
+        Integrations are kernel-level, not agent-level, so the same agent code
+        runs against a real endpoint or a fake one depending on what the
+        operator installed. They are closed by :meth:`shutdown`.
+        """
+        return self.integrations.install(integration)
 
     def children_of(self, name: str) -> tuple[Agent, ...]:
         """Every registered agent spawned by ``name``."""
@@ -412,8 +427,47 @@ class Kernel:
         return kernel
 
     def shutdown(self, wait: bool = True) -> None:
-        """Release any resources held by the execution backend."""
-        self.backend.shutdown(wait=wait)
+        """Release resources held by the backend and the installed integrations.
+
+        Integrations are always closed after the workers of the backend have
+        finished: a step still inside ``ctx.call()`` would otherwise race with
+        a driver closing under it. With ``wait=False`` the caller returns
+        immediately and that wait-then-close happens on a background thread,
+        whose handle is :attr:`shutdown_thread` for anyone that needs to join.
+        A second ``wait=False`` call while that thread is still running is a
+        no-op rather than a second concurrent close.
+        """
+        if wait:
+            with self._lock:
+                pending, self.shutdown_thread = self.shutdown_thread, None
+            if pending is not None and pending.is_alive():
+                # The deferred shutdown does the whole job; waiting for it is
+                # the wait the caller asked for, and closing again on top of
+                # it would close drivers twice.
+                pending.join()
+                return
+            try:
+                self.backend.shutdown(wait=True)
+            finally:
+                self.integrations.close()
+            return
+        with self._lock:
+            pending = self.shutdown_thread
+            if pending is not None and pending.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._shutdown_blocking,
+                name=f"titoos-shutdown-{id(self):x}",
+                daemon=True,
+            )
+            self.shutdown_thread = thread
+            thread.start()
+
+    def _shutdown_blocking(self) -> None:
+        try:
+            self.backend.shutdown(wait=True)
+        finally:
+            self.integrations.close()
 
     def __enter__(self) -> "Kernel":
         return self
