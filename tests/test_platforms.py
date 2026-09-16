@@ -434,13 +434,16 @@ def test_shutdown_closes_shared_adapter_once():
 
 def test_shutdown_closes_other_adapters_when_one_close_fails():
     class BrokenClosePlatform(FakePlatform):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
         def close(self):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("close failed")
 
     broken = BrokenClosePlatform()
-    broken.calls = 0
     adapter = FakePlatform()
     kernel = Kernel()
     kernel.register(broken.agent("broken"))

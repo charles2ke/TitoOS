@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
-import weakref
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
@@ -22,6 +22,7 @@ from .persistence import AgentFactory, AgentRecord, FinishedAgent, Snapshot
 CHILD_FAILED = "titoos.child_failed"
 
 _FINISHED = (AgentState.DONE, AgentState.FAILED)
+_logger = logging.getLogger(__name__)
 
 
 class StopReason(str, Enum):
@@ -92,7 +93,7 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
-        self._closed_adapters: weakref.WeakSet[object] = weakref.WeakSet()
+        self._closed_adapters: list[object] = []
         self._lock = threading.RLock()
 
     @property
@@ -475,31 +476,27 @@ class Kernel:
 
     def _close_platform_adapters(self) -> None:
         with self._lock:
-            adapters = {
-                agent.adapter
-                for agent in self._agents.values()
+            adapters: list[object] = []
+            for agent in self._agents.values():
+                adapter = getattr(agent, "adapter", None)
                 if (
-                    hasattr(agent, "adapter")
-                    and callable(getattr(agent.adapter, "close", None))
-                    and agent.adapter not in self._closed_adapters
-                )
-            }
-        error: Exception | None = None
-        last_error: Exception | None = None
+                    callable(getattr(adapter, "close", None))
+                    and all(adapter is not item for item in self._closed_adapters)
+                    and all(adapter is not item for item in adapters)
+                ):
+                    adapters.append(adapter)
+        errors: list[Exception] = []
         for adapter in adapters:
             try:
                 adapter.close()
             except Exception as exc:
-                if error is None:
-                    error = exc
-                elif last_error is not None:
-                    last_error.__context__ = exc
-                last_error = exc
+                errors.append(exc)
+                _logger.exception("failed to close platform adapter %r", adapter)
             else:
                 with self._lock:
-                    self._closed_adapters.add(adapter)
-        if error is not None:
-            raise error
+                    self._closed_adapters.append(adapter)
+        if errors:
+            raise errors[0]
 
     def __enter__(self) -> "Kernel":
         return self
