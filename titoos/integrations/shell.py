@@ -100,13 +100,12 @@ class ShellIntegration(Integration):
         max_output: int = 1 << 20,
     ) -> None:
         super().__init__(name)
-        self.allowed_commands = normalize_allowlist(
-            allowed_commands, "allowed_commands"
-        )
+        command_names = tuple(command.strip() for command in allowed_commands)
+        self.allowed_commands = normalize_allowlist(command_names, "allowed_commands")
         # Resolving the allowlist once, here, is what makes it an allowlist of
         # programs rather than of names: at run time nothing is looked up from
         # agent input, so an agent-written file cannot claim an allowed name.
-        self._executables = _resolve_allowlist(allowed_commands)
+        self._executables = _resolve_allowlist(command_names)
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_output <= 0:
