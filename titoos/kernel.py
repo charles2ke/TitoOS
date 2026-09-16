@@ -91,6 +91,7 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
+        self._closed_adapter_ids: set[int] = set()
         self._lock = threading.RLock()
 
     @property
@@ -427,7 +428,7 @@ class Kernel:
         return kernel
 
     def shutdown(self, wait: bool = True) -> None:
-        """Release resources held by the backend and the installed integrations.
+        """Release resources held by the backend, integrations, and adapters.
 
         Integrations are always closed after the workers of the backend have
         finished: a step still inside ``ctx.call()`` would otherwise race with
@@ -450,6 +451,7 @@ class Kernel:
                 self.backend.shutdown(wait=True)
             finally:
                 self.integrations.close()
+                self._close_platform_adapters()
             return
         with self._lock:
             pending = self.shutdown_thread
@@ -468,6 +470,22 @@ class Kernel:
             self.backend.shutdown(wait=True)
         finally:
             self.integrations.close()
+            self._close_platform_adapters()
+
+    def _close_platform_adapters(self) -> None:
+        with self._lock:
+            adapters = {
+                id(agent.adapter): agent.adapter
+                for agent in self._agents.values()
+                if (
+                    hasattr(agent, "adapter")
+                    and callable(getattr(agent.adapter, "close", None))
+                    and id(agent.adapter) not in self._closed_adapter_ids
+                )
+            }
+            self._closed_adapter_ids.update(adapters)
+        for adapter in adapters.values():
+            adapter.close()
 
     def __enter__(self) -> "Kernel":
         return self

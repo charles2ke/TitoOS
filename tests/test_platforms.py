@@ -173,6 +173,17 @@ def test_none_result_sends_nothing():
     assert received == []
 
 
+def test_empty_outbound_sequence_sends_nothing():
+    received: list = []
+    adapter = FakePlatform(replies=[[]])
+    kernel = Kernel()
+    kernel.register(adapter.agent("assistant"))
+    kernel.spawn("sink", collector(received))
+    kernel.spawn("boss", lambda ctx: (ctx.send("assistant", "hi"), ctx.wait()))
+    kernel.run(max_ticks=5)
+    assert received == []
+
+
 def test_a_sequence_of_outbound_fans_out():
     received: list = []
     adapter = FakePlatform(
@@ -403,6 +414,22 @@ def test_async_platform_agents_run_on_the_async_backend():
     kernel.run(max_ticks=6)
     kernel.shutdown()
     assert received == [("assistant", "async:go")]
+
+
+def test_shutdown_closes_shared_adapter_once():
+    class CloseCountingPlatform(FakePlatform):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    adapter = CloseCountingPlatform()
+    with Kernel() as kernel:
+        kernel.register(adapter.agent("first"))
+        kernel.register(adapter.agent("second"))
+    assert adapter.calls == 1
 
 
 def test_async_platform_agents_are_rejected_by_the_serial_backend():

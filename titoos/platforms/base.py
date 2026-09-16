@@ -219,7 +219,7 @@ class PlatformAdapter:
             return ()
         if isinstance(result, Outbound):
             return (result,)
-        if isinstance(result, (list, tuple)) and result and all(
+        if isinstance(result, (list, tuple)) and all(
             isinstance(item, Outbound) for item in result
         ):
             return tuple(result)
