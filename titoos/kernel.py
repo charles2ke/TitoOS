@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
@@ -91,7 +92,7 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
-        self._closed_adapter_ids: set[int] = set()
+        self._closed_adapters: weakref.WeakSet[object] = weakref.WeakSet()
         self._lock = threading.RLock()
 
     @property
@@ -475,17 +476,24 @@ class Kernel:
     def _close_platform_adapters(self) -> None:
         with self._lock:
             adapters = {
-                id(agent.adapter): agent.adapter
+                agent.adapter
                 for agent in self._agents.values()
                 if (
                     hasattr(agent, "adapter")
                     and callable(getattr(agent.adapter, "close", None))
-                    and id(agent.adapter) not in self._closed_adapter_ids
+                    and agent.adapter not in self._closed_adapters
                 )
             }
-            self._closed_adapter_ids.update(adapters)
-        for adapter in adapters.values():
-            adapter.close()
+            self._closed_adapters.update(adapters)
+        error: BaseException | None = None
+        for adapter in adapters:
+            try:
+                adapter.close()
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
     def __enter__(self) -> "Kernel":
         return self

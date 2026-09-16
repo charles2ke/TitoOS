@@ -432,6 +432,20 @@ def test_shutdown_closes_shared_adapter_once():
     assert adapter.calls == 1
 
 
+def test_shutdown_closes_other_adapters_when_one_close_fails():
+    class BrokenClosePlatform(FakePlatform):
+        def close(self):
+            raise RuntimeError("close failed")
+
+    adapter = FakePlatform()
+    kernel = Kernel()
+    kernel.register(BrokenClosePlatform().agent("broken"))
+    kernel.register(adapter.agent("other"))
+    with pytest.raises(RuntimeError, match="close failed"):
+        kernel.shutdown()
+    assert adapter.closed
+
+
 def test_async_platform_agents_are_rejected_by_the_serial_backend():
     kernel = Kernel()
     kernel.register(AsyncFakePlatform().agent("assistant", seed="go"))
