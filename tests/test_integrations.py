@@ -483,9 +483,9 @@ def test_shell_runs_an_allowed_command():
 
 
 def test_shell_rejects_commands_outside_the_allowlist():
-    shell = ShellIntegration(allowed_commands=["git"])
+    shell = ShellIntegration(allowed_commands=[interpreter_name()])
     with pytest.raises(IntegrationError, match="not in the allowlist"):
-        shell.run([interpreter_name(), "-c", "print(1)"])
+        shell.run(["not-the-allowed-command"])
 
 
 def test_shell_rejects_a_string_command():
