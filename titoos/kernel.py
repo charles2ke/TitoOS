@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import builtins
 import inspect
 import logging
-import sys
 import threading
-import weakref
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
@@ -95,10 +94,6 @@ class Kernel:
         #: Set by ``shutdown(wait=False)``: the thread closing the drivers once
         #: the workers are done.
         self.shutdown_thread: threading.Thread | None = None
-        self._closed_adapters: weakref.WeakValueDictionary[int, object] = (
-            weakref.WeakValueDictionary()
-        )
-        self._strong_closed_adapters: list[object] = []
         self._lock = threading.RLock()
 
     @property
@@ -480,7 +475,7 @@ class Kernel:
             self._close_platform_adapters()
 
     def _close_platform_adapters(self) -> None:
-        """Close each adapter once, retry failed closes, and finish all closes."""
+        """Close shared adapters once per shutdown and finish all closes."""
         with self._lock:
             adapters: dict[int, object] = {}
             for agent in self._agents.values():
@@ -488,29 +483,20 @@ class Kernel:
                 adapter_id = id(adapter)
                 if (
                     callable(getattr(adapter, "close", None))
-                    and self._closed_adapters.get(adapter_id) is not adapter
-                    and all(
-                        adapter is not item for item in self._strong_closed_adapters
-                    )
-                    and adapters.get(adapter_id) is not adapter
+                    and adapter_id not in adapters
                 ):
                     adapters[adapter_id] = adapter
         errors: list[Exception] = []
-        for adapter_id, adapter in adapters.items():
+        for adapter in adapters.values():
             try:
                 adapter.close()
             except Exception as exc:
                 errors.append(exc)
                 _logger.exception("failed to close platform adapter %r", adapter)
-            else:
-                with self._lock:
-                    try:
-                        self._closed_adapters[adapter_id] = adapter
-                    except TypeError:
-                        self._strong_closed_adapters.append(adapter)
         if errors:
-            if len(errors) > 1 and sys.version_info >= (3, 11):
-                raise ExceptionGroup("failed to close platform adapters", errors)
+            exception_group = getattr(builtins, "ExceptionGroup", None)
+            if len(errors) > 1 and exception_group is not None:
+                raise exception_group("failed to close platform adapters", errors)
             raise errors[0]
 
     def __enter__(self) -> "Kernel":
