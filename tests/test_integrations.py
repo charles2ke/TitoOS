@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -476,15 +477,15 @@ def test_files_read_missing_file(tmp_path):
 
 def test_shell_runs_an_allowed_command():
     shell = ShellIntegration(allowed_commands=[interpreter_name()])
-    result = shell.run([sys.executable, "-c", "print('hi')"])
+    result = shell.run([interpreter_name(), "-c", "print('hi')"])
     assert result.ok
     assert result.stdout.strip() == "hi"
 
 
 def test_shell_rejects_commands_outside_the_allowlist():
-    shell = ShellIntegration(allowed_commands=["git"])
+    shell = ShellIntegration(allowed_commands=[interpreter_name()])
     with pytest.raises(IntegrationError, match="not in the allowlist"):
-        shell.run([sys.executable, "-c", "print(1)"])
+        shell.run(["not-the-allowed-command"])
 
 
 def test_shell_rejects_a_string_command():
@@ -495,30 +496,36 @@ def test_shell_rejects_a_string_command():
 
 def test_shell_arguments_are_data_not_shell_syntax(tmp_path):
     shell = ShellIntegration(allowed_commands=[interpreter_name()])
-    result = shell.run([sys.executable, "-c", "import sys; print(sys.argv[1])", "; ls"])
+    result = shell.run(
+        [interpreter_name(), "-c", "import sys; print(sys.argv[1])", "; ls"]
+    )
     assert result.stdout.strip() == "; ls"
 
 
 def test_shell_reports_failure_and_can_check():
     shell = ShellIntegration(allowed_commands=[interpreter_name()])
-    result = shell.run([sys.executable, "-c", "raise SystemExit(3)"])
+    result = shell.run([interpreter_name(), "-c", "raise SystemExit(3)"])
     assert result.returncode == 3
     assert not result.ok
     with pytest.raises(IntegrationError, match="exit code 3"):
-        shell.run([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+        shell.run([interpreter_name(), "-c", "raise SystemExit(3)"], check=True)
 
 
 def test_shell_times_out():
     shell = ShellIntegration(allowed_commands=[interpreter_name()], timeout=0.2)
     with pytest.raises(IntegrationError, match="timed out"):
-        shell.run([sys.executable, "-c", "import time; time.sleep(5)"])
+        shell.run([interpreter_name(), "-c", "import time; time.sleep(5)"])
 
 
 def test_shell_does_not_inherit_the_parent_environment(monkeypatch):
     monkeypatch.setenv("TITOOS_TEST_SECRET", "hunter2")
     shell = ShellIntegration(allowed_commands=[interpreter_name()])
     result = shell.run(
-        [sys.executable, "-c", "import os; print(os.environ.get('TITOOS_TEST_SECRET'))"]
+        [
+            interpreter_name(),
+            "-c",
+            "import os; print(os.environ.get('TITOOS_TEST_SECRET'))",
+        ]
     )
     assert result.stdout.strip() == "None"
 
@@ -528,7 +535,7 @@ def test_shell_env_can_be_given_explicitly():
         allowed_commands=[interpreter_name()], env={"TITOOS_TEST_VALUE": "42"}
     )
     result = shell.run(
-        [sys.executable, "-c", "import os; print(os.environ['TITOOS_TEST_VALUE'])"]
+        [interpreter_name(), "-c", "import os; print(os.environ['TITOOS_TEST_VALUE'])"]
     )
     assert result.stdout.strip() == "42"
 
@@ -537,7 +544,7 @@ def test_shell_output_is_bounded_while_streaming():
     shell = ShellIntegration(allowed_commands=[interpreter_name()], max_output=32)
     result = shell.run(
         [
-            sys.executable,
+            interpreter_name(),
             "-c",
             "import sys\n"
             "for _ in range(2000):\n"
@@ -556,16 +563,56 @@ def test_shell_requires_an_allowlist():
         ShellIntegration(allowed_commands=[])
 
 
-def test_shell_unknown_executable():
-    shell = ShellIntegration(allowed_commands=["definitely-not-a-real-binary"])
-    with pytest.raises(IntegrationError, match="not found"):
-        shell.run(["definitely-not-a-real-binary"])
+def test_shell_rejects_an_unresolvable_allowlist_entry():
+    with pytest.raises(ValueError, match="not found on PATH"):
+        ShellIntegration(allowed_commands=["definitely-not-a-real-binary"])
+
+
+def test_shell_rejects_a_blank_allowlist_entry():
+    with pytest.raises(ValueError, match="must not be blank"):
+        ShellIntegration(allowed_commands=[interpreter_name(), " "])
+
+
+def test_shell_resolves_allowlist_entries_with_their_original_case(tmp_path, monkeypatch):
+    executable = tmp_path / "MyTool"
+    executable.write_text("#!/bin/sh\necho original-case\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    shell = ShellIntegration(allowed_commands=["MyTool"])
+    result = shell.run(["mytool"])
+    assert result.stdout.strip() == "original-case"
+
+
+def test_shell_rejects_a_path_in_the_allowlist(tmp_path):
+    with pytest.raises(ValueError, match="bare command names"):
+        ShellIntegration(allowed_commands=[str(tmp_path / "git")])
+
+
+def test_shell_rejects_a_path_as_the_program(tmp_path):
+    shell = ShellIntegration(allowed_commands=[interpreter_name()])
+    impostor = tmp_path / interpreter_name()
+    impostor.write_text("#!/bin/sh\necho pwned\n")
+    impostor.chmod(0o755)
+    with pytest.raises(IntegrationError, match="not a path"):
+        shell.run([str(impostor)])
+    with pytest.raises(IntegrationError, match="not a path"):
+        shell.run([f".\\{interpreter_name()}"])
+
+
+def test_shell_runs_the_resolved_executable(tmp_path, monkeypatch):
+    shell = ShellIntegration(allowed_commands=[interpreter_name()])
+    resolved = str(Path(shutil.which(interpreter_name())).resolve())
+    # A later PATH change cannot redirect an already resolved command.
+    monkeypatch.setenv("PATH", str(tmp_path))
+    result = shell.run([interpreter_name(), "-c", "print('hi')"])
+    assert result.command[0] == resolved
+    assert result.stdout.strip() == "hi"
 
 
 def test_shell_stdin_is_forwarded():
     shell = ShellIntegration(allowed_commands=[interpreter_name()])
     result = shell.run(
-        [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"],
+        [interpreter_name(), "-c", "import sys; print(sys.stdin.read().upper())"],
         stdin="abc",
     )
     assert result.stdout.strip() == "ABC"
