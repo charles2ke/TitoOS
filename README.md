@@ -287,8 +287,12 @@ The drivers that reach dangerous resources have no "allow everything" mode:
   disables the writing operations.
 - `ShellIntegration` requires `allowed_commands`, never uses a shell, and takes
   argument vectors, so an agent-produced argument is data rather than syntax.
-  Subprocesses get an explicit minimal environment — the kernel's own is never
-  inherited — and their output is streamed into buffers bounded by
+  Each allowed command must be a bare name and is resolved to an absolute
+  executable when the integration is built — an entry that does not resolve is
+  an error there, not at the first call — and a program given with a path
+  separator is refused, so an agent cannot aim an allowed name at a binary it
+  wrote itself. Subprocesses get an explicit minimal environment — the kernel's
+  own is never inherited — and their output is streamed into buffers bounded by
   `max_output`.
 - `ClockIntegration` caps a single `sleep()`, since a tick is a barrier. A
   `fixed=` clock must be timezone-aware and also freezes `monotonic()`, so a

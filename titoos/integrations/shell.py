@@ -8,7 +8,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .base import Integration, normalize_allowlist
 
@@ -26,6 +26,28 @@ _CHUNK = 8192
 #: that inherited the pipes can hold them open forever, and the timeout of
 #: :meth:`ShellIntegration.run` has to mean something.
 _DRAIN_GRACE = 1.0
+
+
+def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
+    """Map each allowed command name to its absolute executable, or raise.
+
+    An operator names programs, not paths: an entry with a separator in it
+    would make the allowlist depend on where a file happens to sit, and an
+    entry that resolves to nothing would be a permission granted by mistake.
+    Both are refused here rather than at the first call.
+    """
+    resolved: dict[str, str] = {}
+    for name in sorted(names):
+        if name != Path(name).name or "/" in name or "\\" in name:
+            raise ValueError(
+                "allowed_commands entries must be bare command names, not "
+                f"paths: {name!r}"
+            )
+        executable = shutil.which(name)
+        if executable is None:
+            raise ValueError(f"allowed command not found on PATH: {name!r}")
+        resolved[name] = str(Path(executable).resolve())
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -56,7 +78,10 @@ class ShellIntegration(Integration):
     There is no shell: commands are given as argument vectors and executed
     directly, so quoting and metacharacters in an agent-produced argument are
     data rather than syntax. Only the executables named in ``allowed_commands``
-    can be started, matched on the program's base name.
+    can be started: each entry must be a bare command name, is resolved to an
+    absolute executable once, here, and that resolved path is what runs. An
+    ``argv[0]`` carrying a path separator is refused, so an agent cannot point
+    an allowlisted name at a binary it wrote itself.
     """
 
     name = "shell"
@@ -76,6 +101,10 @@ class ShellIntegration(Integration):
         self.allowed_commands = normalize_allowlist(
             allowed_commands, "allowed_commands"
         )
+        # Resolving the allowlist once, here, is what makes it an allowlist of
+        # programs rather than of names: at run time nothing is looked up from
+        # agent input, so an agent-written file cannot claim an allowed name.
+        self._executables = _resolve_allowlist(self.allowed_commands)
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_output <= 0:
@@ -108,16 +137,19 @@ class ShellIntegration(Integration):
         argv = [str(part) for part in command]
         if not argv:
             raise self._fail("command must not be empty", "run")
-        program = Path(argv[0]).name.lower()
-        if program not in self.allowed_commands:
+        program = argv[0]
+        if program != Path(program).name or "/" in program or "\\" in program:
+            raise self._fail(
+                f"command must be a bare program name, not a path: {program!r}",
+                "run",
+            )
+        executable = self._executables.get(program.lower())
+        if executable is None:
             raise self._fail(
                 f"command {program!r} is not in the allowlist "
                 f"({', '.join(sorted(self.allowed_commands))})",
                 "run",
             )
-        executable = shutil.which(argv[0])
-        if executable is None:
-            raise self._fail(f"executable not found: {argv[0]!r}", "run")
         return [executable, *argv[1:]]
 
     def run(
