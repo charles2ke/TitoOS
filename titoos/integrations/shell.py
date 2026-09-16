@@ -37,8 +37,7 @@ def _resolve_allowlist(names: Iterable[str]) -> dict[str, str]:
     Both are refused here rather than at the first call.
     """
     resolved: dict[str, str] = {}
-    for raw_name in sorted(names):
-        name = raw_name.strip()
+    for name in sorted(raw_name.strip() for raw_name in names):
         if not name:
             raise ValueError("allowed_commands entries must not be blank")
         if name != Path(name).name or "/" in name or "\\" in name:
