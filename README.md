@@ -66,6 +66,7 @@ class Counter(Agent):
 | `RestartPolicy` | What happens when an agent raises: `NEVER` or `ON_FAILURE`. |
 | `Snapshot` | A consistent, serializable picture of the kernel between ticks. |
 | `Integration` | A driver for the world outside the kernel: HTTP, files, processes, time. |
+| `PlatformAdapter` | A bridge in the other direction: an agent from another framework, scheduled here. |
 
 ## Blocking and quiescence
 
@@ -325,6 +326,88 @@ resources, not state: they are not captured by `snapshot()`, so a restored
 kernel is installed with the drivers it should use. `kernel.shutdown()` — and
 the context-manager form — closes them once the backend's workers have
 finished, so a step still inside a call never meets a closed driver.
+
+## Agent platforms
+
+An `Integration` is what an agent *calls out* through. A `PlatformAdapter` is
+the other direction: it takes an agent that already exists somewhere else — a
+LangGraph graph, an OpenAI Agents SDK agent, a CrewAI crew, a remote A2A peer
+— and runs it as an ordinary agent here, with a mailbox, supervision, restarts
+and snapshots:
+
+```python
+from titoos import Kernel
+from titoos.platforms import Outbound, PlatformAdapter
+
+class MyFramework(PlatformAdapter):
+    name = "myframework"
+
+    def __init__(self, agent):
+        super().__init__()
+        self.agent = agent                      # the foreign object
+
+    def invoke(self, request, turn):
+        return self.agent.run(request)          # one turn of the platform
+
+kernel = Kernel()
+kernel.register(MyFramework(their_agent).agent("assistant"))
+```
+
+One tick is one platform turn. The adapter never decides when it runs or what
+it sees: the kernel fixes both at the tick barrier, hands it that turn's mail,
+and puts whatever comes back on the bus — which is what keeps a run
+reproducible even though the reasoning happens in someone else's library.
+
+An adapter answers three questions, and only `invoke` is usually needed:
+
+| Hook | Question |
+| --- | --- |
+| `to_platform(turn)` | What does this turn's mail look like to the platform? |
+| `invoke(request, turn)` / `ainvoke(...)` | How is the platform actually run? |
+| `from_platform(result, turn)` | Which messages should the result put on the bus? |
+
+The defaults pass a lone payload through untouched, hand a multi-message turn
+over as a list, and reply to the sender with whatever came back. Return
+`None` to say nothing, or one or more `Outbound(payload, to=..., metadata=...,
+broadcast=...)` to address replies yourself.
+
+`PlatformAgent` options: `seed=` gives the platform something to act on before
+anyone has written to it, `reply_to=` or `broadcast=True` sets where unaddressed
+replies go, and `max_turns=` ends the agent after N turns. With an empty mailbox
+the agent waits instead of invoking anything, so an idle foreign agent never
+costs a model call.
+
+Anything the SDK raises is normalised into `PlatformError` — a subclass of
+`IntegrationError` — so restart policies and `CHILD_FAILED` escalation work
+exactly as they do for any other agent. `save_state()`/`load_state()` on the
+adapter map onto the platform's conversation state where it has one; the
+default saves nothing rather than restoring into a subtly different
+conversation.
+
+### Async SDKs
+
+Set `is_async = True` and implement `ainvoke`; `adapter.agent(...)` then builds
+an `AsyncPlatformAgent`, which needs `AsyncBackend`. The other backends refuse
+it through the same `async def step` check that applies to any agent. A sync
+adapter whose SDK blocks belongs on `ThreadBackend`.
+
+### Selecting a platform by name
+
+Adapters can be published in a registry and built from configuration. A
+registered target may be a `"module:attribute"` string, imported only when
+something actually builds it — so nothing you did not install is ever imported:
+
+```python
+from titoos.platforms import create_platform, register_platform
+
+register_platform("myframework", "mypackage.adapters:MyFramework")
+adapter = create_platform("myframework", their_agent)
+```
+
+Adapters for real frameworks import their SDK lazily through
+`require("package", extra="...")`, which raises `MissingDependency` naming the
+extra to install. TitoOS itself stays dependency-free, and `import titoos`
+never imports the platform layer at all.
 
 ## Tests
 
