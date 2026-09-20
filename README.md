@@ -14,8 +14,8 @@ things a multi-agent system otherwise has to reinvent:
   kernel rather than by agents holding references to each other.
 - **Supervision.** A failing agent is isolated, optionally restarted with its
   mail intact, and its parent is told when it gives up.
-- **Persistence.** Snapshot the whole system at a tick boundary and restore it
-  later.
+- **Persistence.** Snapshot the kernel's tick and lifecycle state, pending
+  mailboxes and opted-in agent data at a tick boundary, and restore it later.
 - **Sandboxed side effects.** HTTP, files, shell and clock drivers that are
   default-deny and installed by the operator, not by the agent.
 - **Foreign agents.** Adapters run agents written for other frameworks as
