@@ -466,4 +466,4 @@ python -m pytest
 
 ## License
 
-[Apache 2.0](LICENSE). Security issues: see [SECURITY.md](SECURITY.md).
+[Apache 2.0](LICENSE).
