@@ -5,6 +5,33 @@ Operating System for Agents.
 TitoOS is a tiny, dependency-free kernel that runs agents cooperatively: it
 registers them, schedules them round-robin, and routes messages between them.
 
+Agents are ordinary Python objects or functions. The kernel gives them the
+things a multi-agent system otherwise has to reinvent:
+
+- **A deterministic scheduler.** One `step()` per runnable agent per tick, with
+  the tick as a barrier — serial, threaded and async runs give the same result.
+- **Message passing.** Mailboxes, direct sends and broadcasts, routed by the
+  kernel rather than by agents holding references to each other.
+- **Supervision.** A failing agent is isolated, optionally restarted with its
+  mail intact, and its parent is told when it gives up.
+- **Persistence.** Snapshot the whole system at a tick boundary and restore it
+  later.
+- **Sandboxed side effects.** HTTP, files, shell and clock drivers that are
+  default-deny and installed by the operator, not by the agent.
+- **Foreign agents.** Adapters run agents written for other frameworks as
+  ordinary agents here.
+
+Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`.
+
+## Contents
+
+- [Install](#install) · [Usage](#usage) · [Concepts](#concepts)
+- [Blocking and quiescence](#blocking-and-quiescence)
+- [Multi-threading](#multi-threading) · [Async execution](#async-execution)
+- [Supervision](#supervision) · [Persistence](#persistence)
+- [Integrations](#integrations) · [Agent platforms](#agent-platforms)
+- [Layout](#layout) · [Tests](#tests) · [License](#license)
+
 ## Install
 
 ```bash
@@ -353,6 +380,15 @@ kernel = Kernel()
 kernel.register(MyFramework(their_agent).agent("assistant"))
 ```
 
+For something that is already a plain callable, `CallableAdapter` skips the
+subclass:
+
+```python
+from titoos.platforms import CallableAdapter
+
+kernel.register(CallableAdapter("echo", lambda request, turn: f"echo:{request}").agent("assistant"))
+```
+
 One tick is one platform turn. The adapter never decides when it runs or what
 it sees: the kernel fixes both at the tick barrier, hands it that turn's mail,
 and puts whatever comes back on the bus — which is what keeps a run
@@ -409,8 +445,25 @@ Adapters for real frameworks import their SDK lazily through
 extra to install. TitoOS itself stays dependency-free, and `import titoos`
 never imports the platform layer at all.
 
+## Layout
+
+| Path | Contents |
+| --- | --- |
+| `titoos/kernel.py` | The scheduler: ticks, supervision, integrations, snapshots. |
+| `titoos/agent.py` | `Agent`, `FunctionAgent`, `Context`, `AgentState`, `RestartPolicy`. |
+| `titoos/bus.py`, `titoos/message.py` | Mailboxes, routing and the `Message` type. |
+| `titoos/backends.py` | `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
+| `titoos/persistence.py` | `Snapshot` and the records it serializes. |
+| `titoos/integrations/` | HTTP, filesystem, shell and clock drivers. |
+| `titoos/platforms/` | `PlatformAdapter` and the platform registry. |
+| `tests/` | Pytest suite, one module per area. |
+
 ## Tests
 
 ```bash
 python -m pytest
 ```
+
+## License
+
+[Apache 2.0](LICENSE). Security issues: see [SECURITY.md](SECURITY.md).
