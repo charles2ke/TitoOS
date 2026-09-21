@@ -61,7 +61,7 @@ def boss(ctx):
 
 kernel.spawn("boss", boss)
 kernel.spawn("worker", worker)
-kernel.run(max_ticks=10)
+reports = kernel.run(max_ticks=10)
 ```
 
 The run above prints `done:task-1` and stops after three ticks. `run()`
@@ -69,7 +69,6 @@ returns one `TickReport` per tick and sets `kernel.stop_reason`, so a run can
 be inspected afterwards without instrumenting the agents:
 
 ```python
-reports = kernel.run(max_ticks=10)
 print(kernel.stop_reason)        # StopReason.FINISHED
 print(reports[-1].ran)           # ('boss',)
 print(kernel.errors)             # [] - (agent name, exception) for each failure
