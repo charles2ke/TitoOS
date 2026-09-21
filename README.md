@@ -466,7 +466,7 @@ never imports the platform layer at all.
 | `run()` returns early, `stop_reason` is `QUIESCENT` | Every live agent is waiting for a message nobody will send — a finished workflow, or a deadlock. |
 | `stop_reason` is `MAX_TICKS` | The budget ran out while agents were still runnable; raise `max_ticks`. |
 | An agent stopped mid-run and nothing was raised | It raised inside `step()`, so it is `FAILED` and isolated. The exception is in `kernel.errors` and the name in `TickReport.failed`; set `restart_policy = RestartPolicy.ON_FAILURE` to retry it. |
-| `KeyError: unknown recipient: 'x'` | No agent of that name is registered, or it already reached `DONE`/`FAILED` and its mailbox was reclaimed. The message lists the mailboxes that do exist. |
+| `KeyError: "unknown recipient: 'x'; mailboxes: a"` | No agent of that name is registered, or it already reached `DONE`/`FAILED` and its mailbox was reclaimed. The message lists the mailboxes that do exist. |
 | A reply is not in `ctx.inbox` in the same tick | Ticks are barriers: a message sent during a tick is delivered on the next one. |
 | `TypeError: ... defines an async step() but SerialBackend cannot await it` | Run the kernel with `Kernel(backend=AsyncBackend())`. |
 | `IntegrationError: no integration installed named 'http'` | Install the driver on the kernel (`kernel.install(...)`) before the agents run. |
