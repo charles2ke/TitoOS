@@ -20,8 +20,11 @@ def test_send_to_unknown_recipient_raises():
     bus = MessageBus()
     bus.register("a")
 
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as error:
         bus.post("a", "nobody", "ping")
+
+    assert "nobody" in str(error.value)
+    assert "mailboxes: a" in str(error.value)
 
 
 def test_broadcast_skips_sender():

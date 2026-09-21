@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "titoos"
-version = "0.1.0"
 description = "A minimal operating system for agents"
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
 license = { file = "LICENSE" }
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+
+[tool.setuptools.dynamic]
+version = { attr = "titoos.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["titoos*"]

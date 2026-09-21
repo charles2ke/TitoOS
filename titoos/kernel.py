@@ -116,8 +116,17 @@ class Kernel:
             return tuple(self._agents.values())
 
     def get(self, name: str) -> Agent:
+        """The registered agent named ``name``.
+
+        Raises :class:`KeyError` naming the registered agents, so a typo is
+        obvious from the message alone.
+        """
         with self._lock:
-            return self._agents[name]
+            agent = self._agents.get(name)
+            if agent is None:
+                known = ", ".join(sorted(self._agents)) or "none"
+                raise KeyError(f"no agent named {name!r}; registered: {known}")
+            return agent
 
     def register(self, agent: Agent, parent: str | None = None) -> Agent:
         """Add ``agent`` to the kernel. Names must be unique.
@@ -527,6 +536,16 @@ class Kernel:
                 _logger.exception("failed to close platform adapter %r", adapter)
         if errors:
             raise _PlatformAdapterCloseError(errors) from errors[0]
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        with self._lock:
+            total = len(self._agents)
+            live = sum(1 for agent in self._agents.values() if agent.is_alive)
+        return (
+            f"<Kernel tick={self._tick} agents={live}/{total} live "
+            f"backend={type(self.backend).__name__} "
+            f"stop_reason={self.stop_reason.value if self.stop_reason else None}>"
+        )
 
     def __enter__(self) -> "Kernel":
         return self

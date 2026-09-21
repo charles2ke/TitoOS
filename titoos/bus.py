@@ -38,7 +38,10 @@ class MessageBus:
                         mailbox.append(message)
                 return
             if message.to not in self._mailboxes:
-                raise KeyError(f"unknown recipient: {message.to!r}")
+                known = ", ".join(sorted(self._mailboxes)) or "none"
+                raise KeyError(
+                    f"unknown recipient: {message.to!r}; mailboxes: {known}"
+                )
             self._mailboxes[message.to].append(message)
 
     def post(self, sender: str, to: str, payload: Any = None, **metadata: Any) -> Message:
