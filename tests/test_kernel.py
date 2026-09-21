@@ -50,6 +50,17 @@ def test_done_agent_mailbox_is_unregistered():
         kernel.bus.post("sender", "done", "late")
 
 
+def test_get_unknown_agent_names_the_registered_ones():
+    kernel = Kernel()
+    kernel.register(Counter("alpha", 1))
+
+    with pytest.raises(KeyError) as error:
+        kernel.get("alfa")
+
+    assert "alfa" in str(error.value)
+    assert "registered: alpha" in str(error.value)
+
+
 def test_run_respects_max_ticks():
     kernel = Kernel()
     forever = kernel.register(Counter("forever", 1_000))
