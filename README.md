@@ -30,12 +30,14 @@ Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`.
 - [Multi-threading](#multi-threading) · [Async execution](#async-execution)
 - [Supervision](#supervision) · [Persistence](#persistence)
 - [Integrations](#integrations) · [Agent platforms](#agent-platforms)
+- [Troubleshooting](#troubleshooting)
 - [Layout](#layout) · [Tests](#tests) · [License](#license)
 
 ## Install
 
 ```bash
-pip install -e ".[test]"
+pip install -e .            # the library
+pip install -e ".[test]"    # plus pytest, to run the suite
 ```
 
 ## Usage
@@ -60,6 +62,18 @@ def boss(ctx):
 kernel.spawn("boss", boss)
 kernel.spawn("worker", worker)
 kernel.run(max_ticks=10)
+```
+
+The run above prints `done:task-1` and stops after three ticks. `run()`
+returns one `TickReport` per tick and sets `kernel.stop_reason`, so a run can
+be inspected afterwards without instrumenting the agents:
+
+```python
+reports = kernel.run(max_ticks=10)
+print(kernel.stop_reason)        # StopReason.FINISHED
+print(reports[-1].ran)           # ('boss',)
+print(kernel.errors)             # [] - (agent name, exception) for each failure
+print(kernel)                    # <Kernel tick=3 agents=0/2 live ...>
 ```
 
 Agents can also subclass `Agent` and implement `step(ctx)`:
@@ -445,6 +459,21 @@ Adapters for real frameworks import their SDK lazily through
 extra to install. TitoOS itself stays dependency-free, and `import titoos`
 never imports the platform layer at all.
 
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| An agent never runs again | It called `ctx.wait()` and its mailbox stayed empty. It wakes on the first tick a message is pending; `TickReport.waiting` lists who was skipped. |
+| `run()` returns early, `stop_reason` is `QUIESCENT` | Every live agent is waiting for a message nobody will send — a finished workflow, or a deadlock. |
+| `stop_reason` is `MAX_TICKS` | The budget ran out while agents were still runnable; raise `max_ticks`. |
+| An agent stopped mid-run and nothing was raised | It raised inside `step()`, so it is `FAILED` and isolated. The exception is in `kernel.errors` and the name in `TickReport.failed`; set `restart_policy = RestartPolicy.ON_FAILURE` to retry it. |
+| `KeyError: unknown recipient: 'x'` | No agent of that name is registered, or it already reached `DONE`/`FAILED` and its mailbox was reclaimed. The message lists the mailboxes that do exist. |
+| A reply is not in `ctx.inbox` in the same tick | Ticks are barriers: a message sent during a tick is delivered on the next one. |
+| `TypeError: ... defines an async step() but SerialBackend cannot await it` | Run the kernel with `Kernel(backend=AsyncBackend())`. |
+| `IntegrationError: no integration installed named 'http'` | Install the driver on the kernel (`kernel.install(...)`) before the agents run. |
+| `RuntimeError: cannot snapshot while agents are running` | `snapshot()` belongs between ticks, never inside a `step()`. |
+| `KeyError: no factory for agent kind(s): ...` | `Kernel.restore()` needs a factory for every live agent's class name. |
+
 ## Layout
 
 | Path | Contents |
@@ -461,6 +490,7 @@ never imports the platform layer at all.
 ## Tests
 
 ```bash
+pip install -e ".[test]"
 python -m pytest
 ```
 
