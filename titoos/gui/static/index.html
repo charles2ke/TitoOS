@@ -18,11 +18,14 @@
   .stat { color: var(--muted); }
   .stat b { color: var(--text); }
   main { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; padding: 16px 20px; }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; overflow-x: auto; }
+  section.wide { grid-column: span 2; }
+  @media (max-width: 820px) { section.wide { grid-column: auto; } }
   section h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  #agents td { white-space: nowrap; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; color: #0f172a; font-weight: 600; }
   .s-ready { background: var(--accent); } .s-running { background: var(--warn); }
@@ -51,7 +54,7 @@
   <h1>Tito<span>OS</span></h1>
   <div class="stat">tick <b id="tick">-</b></div>
   <div class="stat">agents <b id="live">-</b></div>
-  <div class="stat">stop reason <b id="stop-reason">-</b></div>
+  <div class="stat">last run stopped <b id="stop-reason">-</b></div>
   <div class="stat">quiescent <b id="quiescent">-</b></div>
   <div class="stat">backend <b id="backend">-</b></div>
 </header>
@@ -75,7 +78,7 @@
     <div id="status" role="status"></div>
   </section>
 
-  <section aria-labelledby="agents-h">
+  <section class="wide" aria-labelledby="agents-h">
     <h2 id="agents-h">Agents</h2>
     <table>
       <thead><tr><th>Name</th><th>Kind</th><th>State</th><th>Parent</th><th class="num">Restarts</th><th class="num">Pending</th></tr></thead>
