@@ -20,6 +20,8 @@ things a multi-agent system otherwise has to reinvent:
   default-deny and installed by the operator, not by the agent.
 - **Foreign agents.** Adapters run agents written for other frameworks as
   ordinary agents here.
+- **A dashboard.** A browser GUI to watch agents, mailboxes and ticks, and to
+  step, run and message the kernel by hand.
 
 Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`.
 
@@ -30,6 +32,7 @@ Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`.
 - [Multi-threading](#multi-threading) · [Async execution](#async-execution)
 - [Supervision](#supervision) · [Persistence](#persistence)
 - [Integrations](#integrations) · [Agent platforms](#agent-platforms)
+- [GUI](#gui)
 - [Troubleshooting](#troubleshooting)
 - [Layout](#layout) · [Tests](#tests) · [License](#license)
 
@@ -458,6 +461,59 @@ Adapters for real frameworks import their SDK lazily through
 extra to install. TitoOS itself stays dependency-free, and `import titoos`
 never imports the platform layer at all.
 
+## GUI
+
+`titoos.gui` is a browser dashboard for a kernel, served by the standard
+library's HTTP server — still no dependencies. Try it on a demo kernel (a
+dispatcher, two workers of which one fails once and is restarted, and a
+collector):
+
+```bash
+python -m titoos.gui            # http://127.0.0.1:8765/ ; --host/--port to change
+```
+
+Or attach it to your own kernel:
+
+```python
+from titoos.gui import KernelGUI
+
+with KernelGUI(kernel, port=8765).start() as gui:   # port=0 picks a free port
+    print(gui.url)
+    input("press Enter to stop\n")
+```
+
+The page shows the tick, stop reason, every agent's state, parent, restarts and
+pending mail, the contents of each mailbox, recent tick reports, `kernel.errors`
+and the installed integrations. Its controls step the kernel, run it for N
+ticks, and post a message (or a `*` broadcast) onto the bus. Payloads typed as
+JSON are sent as JSON; anything else is sent as text.
+
+The page is a thin client over a JSON API that scripts can use too:
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /api/state` | Everything the page shows. |
+| `GET /api/snapshot` | `kernel.snapshot().to_json()`. |
+| `POST /api/step` | Runs one tick; returns its `TickReport`. |
+| `POST /api/run` | Body `{"max_ticks": N}` (at most 10 000); returns the reports and stop reason. |
+| `POST /api/send` | Body `{"to": "...", "payload": ..., "metadata": {...}}`. |
+
+Things to know:
+
+- **The GUI drives the kernel.** Ticks it runs are serialized under one lock
+  and state is read between ticks. Do not also call `step()`/`run()` from
+  another thread while it is attached. Tick reports are only recorded for ticks
+  the GUI itself ran.
+- **Messages come from `gui`** (change with `sender=`). That name has no
+  mailbox, so an agent replying to it fails with `unknown recipient` unless you
+  register an agent under that name to receive replies.
+- **It is local by default.** It binds to `127.0.0.1`, answers only to the
+  host names it was bound under, and refuses `POST`s that are not JSON or that
+  carry a foreign `Origin`, so another web page cannot drive your kernel. There
+  is no authentication: binding to another interface (with `allowed_hosts=`)
+  lets anyone who can reach it control the kernel.
+- Payloads that are not JSON-serializable are displayed by their `repr`.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -484,6 +540,7 @@ never imports the platform layer at all.
 | `titoos/persistence.py` | `Snapshot` and the records it serializes. |
 | `titoos/integrations/` | HTTP, filesystem, shell and clock drivers. |
 | `titoos/platforms/` | `PlatformAdapter` and the platform registry. |
+| `titoos/gui/` | `KernelGUI`: the browser dashboard and its JSON API. |
 | `tests/` | Pytest suite, one module per area. |
 
 ## Tests
