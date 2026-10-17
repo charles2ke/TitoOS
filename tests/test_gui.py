@@ -1,4 +1,5 @@
 import json
+import threading
 import urllib.error
 import urllib.request
 
@@ -122,6 +123,19 @@ def test_non_json_payloads_are_shown_by_repr():
     assert payload.startswith("<object object")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [float("nan"), float("inf"), {"nested": float("-inf")}],
+)
+def test_non_finite_payloads_are_shown_by_repr(payload):
+    kernel = Kernel()
+    kernel.register(Echo("echo"))
+    kernel.bus.post("someone", "echo", payload)
+    with KernelGUI(kernel) as gui:
+        shown = gui.state()["mailboxes"]["echo"]["messages"][0]["payload"]
+    assert shown == repr(payload)
+
+
 def test_state_message_values_are_detached():
     kernel = Kernel()
     kernel.register(Echo("echo"))
@@ -153,6 +167,24 @@ def test_send_builds_response_while_holding_lock(monkeypatch):
         response = gui.send("echo", {"nested": [1]})
 
     assert response["payload"] == {"nested": [1]}
+
+
+def test_stop_without_serving_does_not_shutdown():
+    with KernelGUI(Kernel()) as gui:
+        gui._server.shutdown = lambda: pytest.fail("shutdown called before serving")
+        gui.stop()
+
+
+def test_stop_stops_caller_managed_server_thread():
+    gui = KernelGUI(Kernel())
+    thread = threading.Thread(target=gui.serve_forever)
+    thread.start()
+    assert gui._serving.wait(timeout=2)
+
+    gui.stop()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
 
 
 def test_send_validates_arguments():

@@ -55,7 +55,7 @@ _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 def _jsonable(value: Any) -> Any:
     """``value`` if it survives JSON encoding, otherwise its ``repr``."""
     try:
-        encoded = json.dumps(value)
+        encoded = json.dumps(value, allow_nan=False)
     except (TypeError, ValueError):
         return repr(value)
     return json.loads(encoded)
@@ -117,7 +117,12 @@ class KernelGUI:
         self.sender = sender
         self.reports: deque[TickReport] = deque(maxlen=history)
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._serve_thread: threading.Thread | None = None
+        self._serving = threading.Event()
+        self._stopped = False
         self._server = ThreadingHTTPServer((host, port), _make_handler(self))
         self._server.daemon_threads = True
         self.host = host
@@ -226,25 +231,48 @@ class KernelGUI:
 
     def start(self) -> "KernelGUI":
         """Serve from a daemon thread and return ``self``."""
-        if self._thread is not None:
-            raise RuntimeError("GUI already started")
-        self._thread = threading.Thread(
-            target=self._server.serve_forever, name="titoos-gui", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None or self._stopped:
+                raise RuntimeError("GUI already started or stopped")
+            self._thread = threading.Thread(
+                target=self.serve_forever, name="titoos-gui", daemon=True
+            )
+            self._thread.start()
         return self
 
     def serve_forever(self) -> None:
         """Serve on the calling thread until :meth:`stop` is called elsewhere."""
-        self._server.serve_forever()
+        with self._lifecycle_lock:
+            if self._stopped:
+                return
+            if self._serving.is_set():
+                raise RuntimeError("GUI already serving")
+            self._serve_thread = threading.current_thread()
+            self._serving.set()
+        try:
+            self._server.serve_forever()
+        finally:
+            with self._lifecycle_lock:
+                self._serving.clear()
+                self._serve_thread = None
 
     def stop(self) -> None:
         """Stop serving and release the port. The kernel is left untouched."""
-        if self._thread is not None:
-            self._server.shutdown()
-            self._thread.join()
-            self._thread = None
-        self._server.server_close()
+        with self._stop_lock:
+            with self._lifecycle_lock:
+                self._stopped = True
+                serving = self._serving.is_set()
+                serve_thread = self._serve_thread
+                thread = self._thread
+            if serving:
+                self._server.shutdown()
+            if serve_thread is not None and serve_thread is not threading.current_thread():
+                serve_thread.join()
+            elif thread is not None and thread is not threading.current_thread():
+                thread.join()
+            self._server.server_close()
+            with self._lifecycle_lock:
+                self._thread = None
 
     def __enter__(self) -> "KernelGUI":
         return self
