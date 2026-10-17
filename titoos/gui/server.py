@@ -55,10 +55,10 @@ _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 def _jsonable(value: Any) -> Any:
     """``value`` if it survives JSON encoding, otherwise its ``repr``."""
     try:
-        json.dumps(value)
+        encoded = json.dumps(value)
     except (TypeError, ValueError):
         return repr(value)
-    return value
+    return json.loads(encoded)
 
 
 def _message(message: Message) -> dict[str, Any]:
@@ -211,7 +211,7 @@ class KernelGUI:
                 self.kernel.bus.send(message)
             except KeyError as exc:
                 raise GUIError(exc.args[0]) from None
-        return _message(message)
+            return _message(message)
 
     def snapshot(self) -> str:
         """The kernel's snapshot as JSON text."""

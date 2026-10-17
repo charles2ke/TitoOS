@@ -6,6 +6,7 @@ import pytest
 
 from titoos import Agent, Kernel
 from titoos.gui import GUIError, KernelGUI
+from titoos.gui import server as gui_server
 from titoos.gui.__main__ import demo_kernel
 
 
@@ -119,6 +120,39 @@ def test_non_json_payloads_are_shown_by_repr():
     with KernelGUI(kernel) as gui:
         payload = gui.state()["mailboxes"]["echo"]["messages"][0]["payload"]
     assert payload.startswith("<object object")
+
+
+def test_state_message_values_are_detached():
+    kernel = Kernel()
+    kernel.register(Echo("echo"))
+    payload = {"nested": [1]}
+    metadata = {"details": {"nested": [2]}}
+    kernel.bus.post("someone", "echo", payload, **metadata)
+
+    with KernelGUI(kernel) as gui:
+        state = gui.state()
+        message = state["mailboxes"]["echo"]["messages"][0]
+        payload["nested"].append(3)
+        metadata["details"]["nested"].append(4)
+
+    assert message["payload"] == {"nested": [1]}
+    assert message["metadata"] == {"details": {"nested": [2]}}
+
+
+def test_send_builds_response_while_holding_lock(monkeypatch):
+    kernel = Kernel()
+    kernel.register(Echo("echo"))
+    with KernelGUI(kernel) as gui:
+        original_message = gui_server._message
+
+        def checked_message(message):
+            assert gui._lock.locked()
+            return original_message(message)
+
+        monkeypatch.setattr(gui_server, "_message", checked_message)
+        response = gui.send("echo", {"nested": [1]})
+
+    assert response["payload"] == {"nested": [1]}
 
 
 def test_send_validates_arguments():
