@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +20,7 @@ from titoos import (
     JsonRpcError,
     Kernel,
 )
+from titoos.integrations.a2a import A2AResult
 from titoos.platforms import PlatformError, create_platform
 
 
@@ -431,6 +434,45 @@ def test_adapter_raises_a_platform_error_for_a_failed_task(agent_server):
     [(name, error)] = kernel.errors
     assert name == "remote" and isinstance(error, PlatformError)
     assert "ended task t-break as failed: kaput" in str(error)
+
+
+def test_adapter_serializes_concurrent_turns_and_conversation_state(agent_server):
+    adapter = A2AAdapter(agent_server.base)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls = []
+
+    def send_message(operation, *, parts, context_id, task_id):
+        calls.append((context_id, task_id, parts))
+        if len(calls) == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+            return A2AResult(
+                "helper", "task", "input_required", "t-ask", "ctx-1", "question", (), {}
+            )
+        return A2AResult("helper", "message", None, None, "ctx-1", "answer", (), {})
+
+    adapter._client.send_message = send_message
+    results = []
+    turn = SimpleNamespace(agent="remote")
+    first = threading.Thread(target=lambda: results.append(adapter.invoke([{"text": "first"}], turn)))
+    second = threading.Thread(target=lambda: results.append(adapter.invoke([{"text": "second"}], turn)))
+    first.start()
+    assert first_entered.wait(1)
+    second.start()
+    time.sleep(0.05)
+    assert len(calls) == 1
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert len(results) == 2
+    assert calls[1][:2] == ("ctx-1", "t-ask")
+    assert (adapter.context_id, adapter.task_id) == ("ctx-1", None)
+    assert adapter.save_state() == {"context_id": "ctx-1", "task_id": None}
+    adapter.load_state({"context_id": "restored", "task_id": "pending"})
+    assert adapter.save_state() == {"context_id": "restored", "task_id": "pending"}
 
 
 def test_adapter_conversation_survives_a_snapshot(agent_server):

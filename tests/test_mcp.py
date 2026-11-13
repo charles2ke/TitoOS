@@ -6,13 +6,14 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from titoos import IntegrationError, JsonRpcError, Kernel, McpIntegration
-from titoos.integrations.mcp import _header_value
+from titoos.integrations.mcp import _StdioTransport, _TransportError, _TransportTimeout, _header_value
 
 FAKE_SERVER = Path(__file__).with_name("fake_mcp_server.py")
 MODERN = "2026-07-28"
@@ -130,6 +131,55 @@ def test_stdio_reports_a_crash_with_its_stderr_and_then_restarts(mcp_log):
     finally:
         mcp.close()
     assert sum("started" in message for message in received(mcp_log)) == 2
+
+
+def test_stdio_write_obeys_its_deadline():
+    transport = _StdioTransport(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={},
+        cwd=None,
+        max_bytes=4096,
+        label="blocked-write",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(_TransportTimeout):
+            transport._write(
+                {"payload": "x" * (1 << 20)},
+                deadline=started + 0.1,
+            )
+        assert time.monotonic() - started < 1
+    finally:
+        transport.close()
+
+
+def test_stdio_close_unblocks_a_blocked_writer():
+    transport = _StdioTransport(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={},
+        cwd=None,
+        max_bytes=4096,
+        label="shutdown-write",
+    )
+    errors = []
+
+    def write():
+        try:
+            transport._write(
+                {"payload": "x" * (1 << 20)},
+                deadline=time.monotonic() + 30,
+            )
+        except _TransportError as exc:
+            errors.append(exc)
+
+    writer = threading.Thread(target=write)
+    writer.start()
+    time.sleep(0.05)
+    transport.close()
+    writer.join(timeout=2)
+
+    assert not writer.is_alive()
+    assert errors
 
 
 def test_stdio_drops_a_server_whose_message_exceeds_max_bytes(mcp_log):
@@ -558,6 +608,19 @@ def test_http_legacy_session_is_renewed_and_finally_ended(mcp_http):
     headers, _ = mcp_http.posts("tools/call")[-1]
     assert (headers["mcp-session-id"], headers["mcp-protocol-version"]) == ("session-2", "2025-11-25")
     assert [h["mcp-session-id"] for h in mcp_http.verbs("DELETE")] == ["session-2"]
+
+
+def test_http_rejects_a_legacy_version_that_differs_from_the_pin(mcp_http):
+    mcp_http.legacy_versions = ["2025-11-25"]
+    mcp = McpIntegration(url=mcp_http.url, protocol_version="2025-06-18")
+    try:
+        with pytest.raises(IntegrationError, match="not the pinned version '2025-06-18'"):
+            mcp.list_tools()
+    finally:
+        mcp.close()
+
+    assert len(mcp_http.posts("initialize")) == 1
+    assert mcp_http.posts("notifications/initialized") == []
 
 
 def test_http_legacy_answers_a_ping_on_the_stream_and_resumes_it(mcp_http):

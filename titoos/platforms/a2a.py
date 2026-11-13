@@ -9,6 +9,7 @@ The outbound direction — an agent deciding to call a remote one — is
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Mapping, Sequence
 
 from ..integrations.a2a import A2AClient, A2APeer, A2AResult
@@ -49,6 +50,7 @@ class A2AAdapter(PlatformAdapter):
         max_bytes: int = 8 << 20,
     ) -> None:
         super().__init__(name)
+        self._state_lock = threading.Lock()
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_bytes <= 0:
@@ -90,32 +92,33 @@ class A2AAdapter(PlatformAdapter):
             return {"text": str(payload)}
 
     def invoke(self, request: Any, turn: PlatformTurn) -> A2AResult:
-        if not request:
-            raise self._fail(f"agent {turn.agent!r} has nothing to send", "invoke")
-        result = self._client.send_message(
-            "invoke", parts=request, context_id=self.context_id, task_id=self.task_id
-        )
-        if result.context_id:
-            self.context_id = result.context_id
-        self.task_id = result.task_id if result.needs_input else None
-        if result.state in _FAILURES:
-            detail = f": {result.text}" if result.text else ""
-            raise self._fail(
-                f"A2A peer {self.name!r} ended task {result.task_id} as {result.state}{detail}",
-                "invoke",
+        with self._state_lock:
+            if not request:
+                raise self._fail(f"agent {turn.agent!r} has nothing to send", "invoke")
+            result = self._client.send_message(
+                "invoke", parts=request, context_id=self.context_id, task_id=self.task_id
             )
-        if result.state in _ACTIVE:
-            raise self._fail(
-                f"A2A peer {self.name!r} is still running task {result.task_id} "
-                f"({result.state}) after {self.timeout}s; raise timeout= for slow peers",
-                "invoke",
-            )
-        if not (result.done or result.needs_input):
-            raise self._fail(
-                f"A2A peer {self.name!r} left task {result.task_id} in state {result.state!r}",
-                "invoke",
-            )
-        return result
+            if result.context_id:
+                self.context_id = result.context_id
+            self.task_id = result.task_id if result.needs_input else None
+            if result.state in _FAILURES:
+                detail = f": {result.text}" if result.text else ""
+                raise self._fail(
+                    f"A2A peer {self.name!r} ended task {result.task_id} as {result.state}{detail}",
+                    "invoke",
+                )
+            if result.state in _ACTIVE:
+                raise self._fail(
+                    f"A2A peer {self.name!r} is still running task {result.task_id} "
+                    f"({result.state}) after {self.timeout}s; raise timeout= for slow peers",
+                    "invoke",
+                )
+            if not (result.done or result.needs_input):
+                raise self._fail(
+                    f"A2A peer {self.name!r} left task {result.task_id} in state {result.state!r}",
+                    "invoke",
+                )
+            return result
 
     def from_platform(self, result: Any, turn: PlatformTurn) -> Sequence[Outbound]:
         if not isinstance(result, A2AResult):
@@ -133,9 +136,11 @@ class A2AAdapter(PlatformAdapter):
         return (Outbound(payload=result.text if plain else result.to_dict(), metadata=metadata),)
 
     def save_state(self) -> dict[str, Any]:
-        return {"context_id": self.context_id, "task_id": self.task_id}
+        with self._state_lock:
+            return {"context_id": self.context_id, "task_id": self.task_id}
 
     def load_state(self, data: dict[str, Any]) -> None:
         context_id, task_id = data.get("context_id"), data.get("task_id")
-        self.context_id = context_id if isinstance(context_id, str) and context_id else None
-        self.task_id = task_id if isinstance(task_id, str) and task_id else None
+        with self._state_lock:
+            self.context_id = context_id if isinstance(context_id, str) and context_id else None
+            self.task_id = task_id if isinstance(task_id, str) and task_id else None

@@ -79,6 +79,8 @@ _MAX_RESUMES = 5
 _EXIT_GRACE = 2.0
 #: How long to wait for a reader thread once the server is gone.
 _DRAIN_GRACE = 1.0
+#: How long to give a best-effort stdio write after its request timed out.
+_CANCEL_WRITE_TIMEOUT = 0.1
 #: Bytes of a server's stderr kept for error messages.
 _STDERR_TAIL = 4096
 #: Bound on best-effort requests: answers to pings, cancellations, DELETE.
@@ -317,7 +319,7 @@ class _StdioTransport:
         if failure is not None:
             raise _TransportError(failure + self._stderr_hint())
         try:
-            self._write(message)
+            self._write(message, deadline=deadline)
             if not pending.event.wait(max(deadline - time.monotonic(), 0.0)):
                 if cancel_on_timeout:
                     self._write_quietly(
@@ -325,7 +327,8 @@ class _StdioTransport:
                             "jsonrpc": "2.0",
                             "method": "notifications/cancelled",
                             "params": {"requestId": request_id, "reason": "timed out"},
-                        }
+                        },
+                        deadline=time.monotonic() + _CANCEL_WRITE_TIMEOUT,
                     )
                 raise _TransportTimeout("the server did not answer in time")
             if pending.failure is not None:
@@ -336,25 +339,53 @@ class _StdioTransport:
                 self._pending.pop(request_id, None)
 
     def notify(self, message: dict[str, Any], *, headers: Mapping[str, str], deadline: float) -> None:
-        self._write(message)
+        self._write(message, deadline=deadline)
 
-    def _write(self, message: dict[str, Any]) -> None:
+    def _write(self, message: dict[str, Any], *, deadline: float) -> None:
         # json.dumps escapes newlines inside strings, so one message is one line.
         data = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
+        if not self._write_lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+            self._signal(_SIGKILL)
+            raise _TransportTimeout("the server did not read the request in time")
         try:
-            with self._write_lock:
-                stdin = self._process.stdin
-                assert stdin is not None
-                stdin.write(data)
-                stdin.flush()
-        except (OSError, ValueError) as exc:
-            raise _TransportError(
-                f"cannot write to the server: {exc}{self._stderr_hint()}"
-            ) from exc
+            with self._lock:
+                if self._closed:
+                    raise _TransportError("the server process is closed")
+            completed = threading.Event()
+            errors: list[BaseException] = []
 
-    def _write_quietly(self, message: dict[str, Any]) -> None:
+            def write() -> None:
+                try:
+                    stdin = self._process.stdin
+                    assert stdin is not None
+                    stdin.write(data)
+                    stdin.flush()
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    completed.set()
+
+            threading.Thread(target=write, name=f"mcp-{self._label}-writer", daemon=True).start()
+            if not completed.wait(max(deadline - time.monotonic(), 0.0)):
+                self._signal(_SIGKILL)
+                completed.wait(_DRAIN_GRACE)
+                raise _TransportTimeout("the server did not read the request in time")
+            if errors:
+                exc = errors[0]
+                if isinstance(exc, (OSError, ValueError)):
+                    raise _TransportError(
+                        f"cannot write to the server: {exc}{self._stderr_hint()}"
+                    ) from exc
+                raise exc
+        finally:
+            self._write_lock.release()
+
+    def _write_quietly(self, message: dict[str, Any], *, deadline: float | None = None) -> None:
         try:
-            self._write(message)
+            self._write(
+                message,
+                deadline=deadline or time.monotonic() + _COURTESY_TIMEOUT,
+            )
         except _TransportError as exc:
             logger.debug("MCP server %r: %s", self._label, exc)
 
@@ -410,7 +441,10 @@ class _StdioTransport:
                     # Answered off this thread: blocking on a full stdin pipe
                     # here would stop the responses that would drain it.
                     threading.Thread(
-                        target=self._write_quietly, args=(_answer_for(item),), daemon=True
+                        target=self._write_quietly,
+                        args=(_answer_for(item),),
+                        kwargs={"deadline": time.monotonic() + _COURTESY_TIMEOUT},
+                        daemon=True,
                     ).start()
                 continue
             request_id = item.get("id")
@@ -466,13 +500,18 @@ class _StdioTransport:
                 return
             self._closed = True
         process = self._process
-        # The graceful path the specification asks for: close stdin, then
-        # escalate only if the server ignores it.
-        try:
-            assert process.stdin is not None
-            process.stdin.close()
-        except (OSError, ValueError):
-            pass
+        # Close stdin gracefully only when no writer is blocked in the pipe.
+        if self._write_lock.acquire(timeout=_CANCEL_WRITE_TIMEOUT):
+            try:
+                try:
+                    assert process.stdin is not None
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            finally:
+                self._write_lock.release()
+        else:
+            self._signal(_SIGTERM)
         for sig in (None, _SIGTERM, _SIGKILL):
             if sig is not None:
                 self._signal(sig)
@@ -481,6 +520,15 @@ class _StdioTransport:
                 break
             except subprocess.TimeoutExpired:
                 continue
+        if self._write_lock.acquire(timeout=_DRAIN_GRACE):
+            try:
+                try:
+                    assert process.stdin is not None
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            finally:
+                self._write_lock.release()
         for reader in self._readers:
             reader.join(timeout=_DRAIN_GRACE)
         for stream in (process.stdout, process.stderr):
@@ -1553,6 +1601,12 @@ class McpIntegration(Integration):
             raise self._fail(
                 f"MCP server {self.name!r} chose protocol version {negotiated!r}, "
                 "which titoos does not support",
+                operation,
+            )
+        if self.protocol_version is not None and negotiated != self.protocol_version:
+            raise self._fail(
+                f"MCP server {self.name!r} chose protocol version {negotiated!r}, "
+                f"not the pinned version {self.protocol_version!r}",
                 operation,
             )
         transport.begin_legacy(negotiated)
