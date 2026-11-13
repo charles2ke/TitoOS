@@ -15,8 +15,12 @@ Write your own by subclassing
 :class:`~titoos.platforms.base.PlatformAdapter` and, if it should be
 selectable by name, publishing it with
 :func:`~titoos.platforms.base.register_platform`.
+
+:class:`~titoos.platforms.a2a.A2AAdapter` ships built in, published as
+``"a2a"``: it runs a remote Agent2Agent (A2A) agent as a kernel agent.
 """
 
+from .a2a import A2AAdapter
 from .base import (
     AdapterFactory,
     AgentPlatform,
@@ -37,6 +41,7 @@ from .base import (
 )
 
 __all__ = [
+    "A2AAdapter",
     "AdapterFactory",
     "AgentPlatform",
     "AsyncPlatformAgent",

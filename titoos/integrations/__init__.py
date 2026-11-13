@@ -21,12 +21,18 @@ from .base import (
     normalize_allowlist,
     redact,
 )
+from .a2a import A2AIntegration, A2APeer, A2AResult
 from .clock import ClockIntegration
 from .files import FileSystemIntegration
 from .http import HttpIntegration, HttpResponse
+from .jsonrpc import JsonRpcError
+from .mcp import McpIntegration, McpToolResult
 from .shell import CommandResult, ShellIntegration
 
 __all__ = [
+    "A2AIntegration",
+    "A2APeer",
+    "A2AResult",
     "ClockIntegration",
     "CommandResult",
     "FileSystemIntegration",
@@ -35,6 +41,9 @@ __all__ = [
     "Integration",
     "IntegrationError",
     "IntegrationRegistry",
+    "JsonRpcError",
+    "McpIntegration",
+    "McpToolResult",
     "ShellIntegration",
     "normalize_allowlist",
     "redact",
