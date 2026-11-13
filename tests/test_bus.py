@@ -1,3 +1,6 @@
+import copy
+import dataclasses
+
 import pytest
 
 from titoos import BROADCAST, Message, MessageBus
@@ -59,6 +62,25 @@ def test_message_metadata_is_immutable():
     assert message.metadata == {"priority": 3}
     with pytest.raises(TypeError):
         message.metadata["priority"] = 5
+
+
+def test_posted_message_is_indistinguishable_from_a_constructed_one():
+    bus = MessageBus()
+    bus.register("a")
+    bus.register("b")
+
+    for metadata in ({}, {"priority": 3}):
+        posted = bus.post("a", "b", "ping", **metadata)
+        built = Message(sender="a", to="b", payload="ping", metadata=metadata)
+
+        assert posted == built
+        assert repr(posted) == repr(built)
+        assert copy.copy(posted) == built
+        assert dataclasses.replace(posted, payload="pong").metadata == metadata
+        with pytest.raises(TypeError):
+            posted.metadata["priority"] = 5
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            posted.payload = "pong"
 
 
 def test_unregister_removes_mailbox():

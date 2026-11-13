@@ -1,3 +1,5 @@
+from unittest import mock
+
 import pytest
 
 from titoos import Agent, AgentState, Kernel
@@ -156,3 +158,34 @@ def test_base_agent_step_is_abstract():
 def test_negative_max_ticks_rejected():
     with pytest.raises(ValueError):
         Kernel().run(max_ticks=-1)
+
+
+def test_run_calls_an_overridden_step_once_per_tick():
+    class CountingKernel(Kernel):
+        steps = 0
+
+        def step(self):
+            self.steps += 1
+            return super().step()
+
+    kernel = CountingKernel()
+    kernel.register(Counter("a", 3))
+
+    reports = kernel.run(max_ticks=10)
+
+    assert kernel.steps == len(reports) == 3
+
+
+@pytest.mark.parametrize("on_class", [False, True], ids=["instance", "class"])
+def test_run_calls_a_patched_step_once_per_tick(on_class):
+    kernel = Kernel()
+    kernel.register(Counter("a", 3))
+    if on_class:
+        patch = mock.patch.object(Kernel, "step", autospec=True, side_effect=Kernel.step)
+    else:
+        patch = mock.patch.object(kernel, "step", wraps=kernel.step)
+
+    with patch as spy:
+        reports = kernel.run(max_ticks=10)
+
+    assert spy.call_count == len(reports) == 3

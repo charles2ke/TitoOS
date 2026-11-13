@@ -20,16 +20,19 @@ things a multi-agent system otherwise has to reinvent:
   default-deny and installed by the operator, not by the agent.
 - **Foreign agents.** Adapters run agents written for other frameworks as
   ordinary agents here.
+- **GPU agents.** A CUDA backend gives each agent a device and makes the tick
+  barrier wait for the GPU, using PyTorch or CuPy when one is installed.
 - **A dashboard.** A browser GUI to watch agents, mailboxes and ticks, and to
   step, run and message the kernel by hand.
 
-Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`.
+Requires Python 3.10+ and nothing else; the test extra pulls in `pytest`, and
+the CUDA backend uses PyTorch or CuPy only if you install one.
 
 ## Contents
 
 - [Install](#install) · [Usage](#usage) · [Concepts](#concepts)
 - [Blocking and quiescence](#blocking-and-quiescence)
-- [Multi-threading](#multi-threading) · [Async execution](#async-execution)
+- [Multi-threading](#multi-threading) · [Async execution](#async-execution) · [CUDA](#cuda)
 - [Supervision](#supervision) · [Persistence](#persistence)
 - [Integrations](#integrations) · [Agent platforms](#agent-platforms)
 - [GUI](#gui)
@@ -105,7 +108,7 @@ class Counter(Agent):
 | `MessageBus` | Mailboxes and routing, including `BROADCAST` delivery. |
 | `TickReport` | Which agents ran, failed, waited or were restarted during a tick. |
 | `StopReason` | Why `run()` stopped: `FINISHED`, `QUIESCENT`, or `MAX_TICKS`. |
-| `ExecutionBackend` | How a tick's agents run: `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
+| `ExecutionBackend` | How a tick's agents run: `SerialBackend`, `ThreadBackend`, `AsyncBackend`, `CudaBackend`. |
 | `RestartPolicy` | What happens when an agent raises: `NEVER` or `ON_FAILURE`. |
 | `Snapshot` | A consistent, serializable picture of the kernel between ticks. |
 | `Integration` | A driver for the world outside the kernel: HTTP, files, processes, time. |
@@ -210,7 +213,73 @@ ordinary sync agents, but a blocking one stalls the whole tick — use
 `ThreadBackend` for those. `max_workers=N` remains a shorthand for
 `ThreadBackend(N)`.
 
-All three backends produce identical results for the same program.
+Every backend produces the same results for the same program.
+
+## CUDA
+
+A GPU cannot make the kernel itself faster — scheduling a tick or routing a
+message costs less than launching one CUDA kernel — but it can make what agents
+compute faster: inference, embeddings, vector search. `CudaBackend` runs such
+agents with PyTorch or CuPy:
+
+```python
+import torch
+from titoos import Agent, CudaBackend, Kernel
+
+class Embedder(Agent):
+    model = None
+
+    def step(self, ctx):
+        if self.model is None:
+            self.model = load_model().to("cuda")  # onto this agent's GPU
+        for message in ctx.inbox:
+            batch = torch.as_tensor(message.payload, device="cuda")
+            ctx.send("indexer", self.model(batch))
+        ctx.wait()
+
+with Kernel(backend=CudaBackend()) as kernel:
+    kernel.register(Embedder("embedder"))
+    kernel.spawn("indexer", indexer)
+    kernel.run()
+```
+
+- **Placement.** Each agent gets a device the first time it is scheduled and
+  keeps it while it is alive, through waits and restarts. Give an agent a
+  `cuda_device` attribute to pin it; the others go to the device with the
+  fewest live agents. `backend.device_of(name)` and `backend.describe()` show
+  where everything runs.
+- **Activation.** While an agent's `step()` runs, its device is the current
+  CUDA device, so `device="cuda"` and CuPy allocations land there without the
+  agent naming one.
+- **The barrier reaches the GPU.** CUDA calls return once work is queued, so
+  before a tick ends the backend waits for every device used in it: a tensor
+  sent in a message is complete when its recipient runs, while within a tick
+  work on different devices overlaps. An asynchronous CUDA error surfacing
+  then fails the agents that ran on that device, and supervision takes over.
+
+`CudaBackend(devices=[0, 1])` limits the devices, `driver="torch"` or
+`"cupy"` picks the library — by default the first that sees a GPU; pick the
+one your agents use — and `max_workers=N` runs each tick's agents in a thread
+pool as `ThreadBackend` does. Without a usable GPU the constructor raises
+`CudaUnavailableError`, so a program can fall back:
+
+```python
+try:
+    backend = CudaBackend()
+except CudaUnavailableError:
+    backend = ThreadBackend(8)
+```
+
+Agents on a device share the library's current stream there instead of
+getting one each: with a stream per agent, the caching allocators of PyTorch
+and CuPy could hand a tensor's memory to new work while another agent's stream
+still reads it. For the same reason leave CuPy's per-thread default stream
+(`CUPY_CUDA_PER_THREAD_DEFAULT_STREAM`) off when `max_workers > 1`, and an
+agent that creates its own streams must follow its library's rules for sharing
+tensors across them (`Tensor.record_stream` in PyTorch). The barrier waits only
+for the devices agents are placed on, so an agent that also queues work on
+another GPU should synchronize it before its step returns. Neither library is a
+dependency, and `import titoos` never imports one.
 
 ## Supervision
 
@@ -528,6 +597,9 @@ Things to know:
 | `IntegrationError: no integration installed named 'http'` | Install the driver on the kernel (`kernel.install(...)`) before the agents run. |
 | `RuntimeError: cannot snapshot while agents are running` | `snapshot()` belongs between ticks, never inside a `step()`. |
 | `KeyError: no factory for agent kind(s): ...` | `Kernel.restore()` needs a factory for every live agent's class name. |
+| `CudaUnavailableError: no CUDA device is available` | Neither PyTorch nor CuPy is installed with GPU support, or no GPU or driver is visible; the message gives the reason per library. Catch it and fall back to another backend. |
+| `Expected all tensors to be on the same device` | An agent used a tensor or model that lives on another agent's GPU — or was created at import time, on device 0. Create GPU state inside `step()`, move tensors that arrive in messages with `.to("cuda")`, or pin the agents to one device with `cuda_device`. |
+| Every agent on one GPU failed in the same tick | Waiting for that device raised: an asynchronous CUDA error from work queued during the tick, which cannot be traced to one agent. The error is in `kernel.errors`. |
 
 ## Layout
 
@@ -537,6 +609,7 @@ Things to know:
 | `titoos/agent.py` | `Agent`, `FunctionAgent`, `Context`, `AgentState`, `RestartPolicy`. |
 | `titoos/bus.py`, `titoos/message.py` | Mailboxes, routing and the `Message` type. |
 | `titoos/backends.py` | `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
+| `titoos/cuda.py` | `CudaBackend`: device placement and the tick barrier on the GPU. |
 | `titoos/persistence.py` | `Snapshot` and the records it serializes. |
 | `titoos/integrations/` | HTTP, filesystem, shell and clock drivers. |
 | `titoos/platforms/` | `PlatformAdapter` and the platform registry. |

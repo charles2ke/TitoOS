@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from .agent import Agent, AgentState, Context, FunctionAgent, RestartPolicy
 from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBackend
 from .bus import MessageBus
+from .cuda import CudaBackend, CudaUnavailableError
 from .integrations import (
     ClockIntegration,
     CommandResult,
@@ -44,6 +45,8 @@ __all__ = [
     "ClockIntegration",
     "CommandResult",
     "Context",
+    "CudaBackend",
+    "CudaUnavailableError",
     "ExecutionBackend",
     "FileSystemIntegration",
     "FunctionAgent",

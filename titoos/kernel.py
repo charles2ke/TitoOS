@@ -213,7 +213,7 @@ class Kernel:
         """The live agents as of now, in registration order."""
         with self._lock:
             agents = tuple(self._agents.values())
-        return tuple(agent for agent in agents if agent.is_alive)
+        return tuple([agent for agent in agents if agent.is_alive])
 
     def is_quiescent(self) -> bool:
         """True when live agents remain but none of them can make progress.
@@ -226,9 +226,11 @@ class Kernel:
     def _is_quiescent(self, live: Sequence[Agent]) -> bool:
         if not live:
             return False
-        if any(agent.state is not AgentState.WAITING for agent in live):
-            return False
-        return not self.bus.any_pending(agent.name for agent in live)
+        waiting = AgentState.WAITING
+        for agent in live:
+            if agent.state is not waiting:
+                return False
+        return not self.bus.any_pending([agent.name for agent in live])
 
     def _run_agent(self, agent: Agent, tick: int, inbox: list[Message]) -> bool:
         """Run a single agent for one tick. Returns ``True`` if it succeeded."""
@@ -273,6 +275,10 @@ class Kernel:
         Waiting agents are skipped unless a message was pending for them at
         the tick boundary, in which case they wake and run with it.
         """
+        return self._step(self._live_snapshot())
+
+    def _step(self, live: tuple[Agent, ...]) -> TickReport:
+        """One tick over ``live``, the live agents as of this tick boundary."""
         self._tick += 1
         tick = self._tick
         # Drain every mailbox up front so the set of messages an agent sees is
@@ -282,9 +288,9 @@ class Kernel:
         scheduled: list[Agent] = []
         inboxes: list[list[Message]] = []
         waiting: list[str] = []
-        live = self._live_snapshot()
+        waiting_state = AgentState.WAITING
         for agent, inbox in zip(live, self.bus.receive_many([a.name for a in live])):
-            if agent.state is AgentState.WAITING and not inbox:
+            if not inbox and agent.state is waiting_state:
                 waiting.append(agent.name)
                 continue
             scheduled.append(agent)
@@ -342,7 +348,12 @@ class Kernel:
             if self._is_quiescent(live):
                 self.stop_reason = StopReason.QUIESCENT
                 break
-            reports.append(self.step())
+            # Reuse the snapshot just taken for the stop checks, unless step()
+            # was overridden, replaced on this kernel or patched: then call it.
+            if "step" not in vars(self) and type(self).step is _KERNEL_STEP:
+                reports.append(self._step(live))
+            else:
+                reports.append(self.step())
         else:
             live = self._live_snapshot()
             if not live:
@@ -557,3 +568,8 @@ class Kernel:
         tb: TracebackType | None,
     ) -> None:
         self.shutdown()
+
+
+#: The original Kernel.step, so run() can tell when it has been overridden,
+#: replaced or patched.
+_KERNEL_STEP = Kernel.step
