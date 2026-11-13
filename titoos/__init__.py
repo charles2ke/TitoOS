@@ -7,6 +7,9 @@ from .backends import AsyncBackend, ExecutionBackend, SerialBackend, ThreadBacke
 from .bus import MessageBus
 from .cuda import CudaBackend, CudaUnavailableError
 from .integrations import (
+    A2AIntegration,
+    A2APeer,
+    A2AResult,
     ClockIntegration,
     CommandResult,
     FileSystemIntegration,
@@ -15,6 +18,9 @@ from .integrations import (
     Integration,
     IntegrationError,
     IntegrationRegistry,
+    JsonRpcError,
+    McpIntegration,
+    McpToolResult,
     ShellIntegration,
 )
 from .kernel import CHILD_FAILED, Kernel, StopReason, TickReport
@@ -23,6 +29,7 @@ from .persistence import AgentFactory, AgentRecord, Snapshot
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .platforms import (
+        A2AAdapter,
         AsyncPlatformAgent,
         CallableAdapter,
         Outbound,
@@ -33,6 +40,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     )
 
 __all__ = [
+    "A2AAdapter",
+    "A2AIntegration",
+    "A2APeer",
+    "A2AResult",
     "Agent",
     "AgentFactory",
     "AgentRecord",
@@ -55,7 +66,10 @@ __all__ = [
     "Integration",
     "IntegrationError",
     "IntegrationRegistry",
+    "JsonRpcError",
     "Kernel",
+    "McpIntegration",
+    "McpToolResult",
     "Message",
     "MessageBus",
     "Outbound",
@@ -79,6 +93,7 @@ __all__ = [
 #: core import free of anything the caller did not ask for.
 _PLATFORM_EXPORTS = frozenset(
     {
+        "A2AAdapter",
         "AsyncPlatformAgent",
         "CallableAdapter",
         "Outbound",

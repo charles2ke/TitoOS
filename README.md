@@ -20,6 +20,9 @@ things a multi-agent system otherwise has to reinvent:
   default-deny and installed by the operator, not by the agent.
 - **Foreign agents.** Adapters run agents written for other frameworks as
   ordinary agents here.
+- **MCP servers and A2A agents.** Agents use the tools, resources and prompts
+  of Model Context Protocol servers and message remote agents over
+  Agent2Agent (A2A), and a remote A2A agent can join the bus as a local one.
 - **GPU agents.** A CUDA backend gives each agent a device and makes the tick
   barrier wait for the GPU, using PyTorch or CuPy when one is installed.
 - **A dashboard.** A browser GUI to watch agents, mailboxes and ticks, and to
@@ -34,7 +37,8 @@ the CUDA backend uses PyTorch or CuPy only if you install one.
 - [Blocking and quiescence](#blocking-and-quiescence)
 - [Multi-threading](#multi-threading) · [Async execution](#async-execution) · [CUDA](#cuda)
 - [Supervision](#supervision) · [Persistence](#persistence)
-- [Integrations](#integrations) · [Agent platforms](#agent-platforms)
+- [Integrations](#integrations) · [MCP servers](#mcp-servers) · [A2A agents](#a2a-agents)
+- [Agent platforms](#agent-platforms) · [Remote A2A agents](#remote-a2a-agents)
 - [GUI](#gui)
 - [Troubleshooting](#troubleshooting)
 - [Layout](#layout) · [Tests](#tests) · [License](#license)
@@ -111,7 +115,7 @@ class Counter(Agent):
 | `ExecutionBackend` | How a tick's agents run: `SerialBackend`, `ThreadBackend`, `AsyncBackend`, `CudaBackend`. |
 | `RestartPolicy` | What happens when an agent raises: `NEVER` or `ON_FAILURE`. |
 | `Snapshot` | A consistent, serializable picture of the kernel between ticks. |
-| `Integration` | A driver for the world outside the kernel: HTTP, files, processes, time. |
+| `Integration` | A driver for the world outside the kernel: HTTP, files, processes, time, MCP servers, A2A agents. |
 | `PlatformAdapter` | A bridge in the other direction: an agent from another framework, scheduled here. |
 
 ## Blocking and quiescence
@@ -380,6 +384,8 @@ kernel.run()
 | `FileSystemIntegration` | `read_text`, `write_text`, `append_text`, `list_dir`, `exists`, `delete`, `describe` |
 | `ShellIntegration` | `run`, `describe` |
 | `ClockIntegration` | `now`, `timestamp`, `monotonic`, `sleep`, `describe` |
+| `McpIntegration` | `list_tools`, `call_tool`, `list_resources`, `list_resource_templates`, `read_resource`, `list_prompts`, `get_prompt`, `server_info`, `describe` |
+| `A2AIntegration` | `send_message`, `get_task`, `cancel_task`, `agent_card`, `describe` |
 
 An integration call happens inside the running `step()`, so it is covered by
 the tick barrier like any other work: results only reach other agents through
@@ -410,11 +416,120 @@ The drivers that reach dangerous resources have no "allow everything" mode:
 - `ClockIntegration` caps a single `sleep()`, since a tick is a barrier. A
   `fixed=` clock must be timezone-aware and also freezes `monotonic()`, so a
   fixed run is reproducible.
+- `McpIntegration` reaches the one server it was built for. A `command=` is an
+  argument vector, never a shell string, and its program is resolved to an
+  absolute path when the integration is built; the server inherits only a
+  minimal environment (`HOME`, `PATH`, `USER` and the like) plus `env=`.
+  `allowed_tools=` narrows which tools agents may list and call. HTTP
+  `headers=` are redacted from `describe()` and redirects are never followed,
+  so credentials only ever reach `url`.
+- `A2AIntegration` reaches only the peers in its address book. An agent card
+  is followed only to endpoints at the card's own origin, so a card cannot
+  point a peer's `headers` at another server; `A2APeer(endpoint=...)` names an
+  endpoint explicitly. Redirects are never followed and every response is
+  capped at `max_bytes`.
 
 Only the operations an integration lists in `operations` are callable, so its
 surface is exactly what it advertises — including through
 `ctx.integration("http")`, which hands back a restricted handle exposing those
 operations as methods and nothing else.
+
+### MCP servers
+
+`McpIntegration` connects to one [Model Context Protocol](https://modelcontextprotocol.io)
+server — a program it starts and talks to over stdio, or a Streamable HTTP
+endpoint — and lets agents use its tools, resources and prompts. Install one
+per server, each under its own name:
+
+```python
+from titoos import Kernel, McpIntegration
+
+kernel = Kernel()
+kernel.install(McpIntegration(command=["python", "-m", "notes_server"], name="notes"))
+kernel.install(
+    McpIntegration(
+        url="https://mcp.example.com/mcp",
+        headers={"Authorization": "Bearer ..."},
+        allowed_tools=["search"],
+        name="search",
+    )
+)
+
+def researcher(ctx):
+    print([tool["name"] for tool in ctx.call("search", "list_tools")])   # ['search']
+    result = ctx.call("search", "call_tool", "search", {"query": "titoos"})
+    if result.ok:
+        ctx.call("notes", "call_tool", "append", {"text": result.text})
+    ctx.exit()
+```
+
+- **Versions.** The client speaks the 2026-07-28 revision, where every request
+  carries its own version, and falls back to the `initialize` handshake of
+  2025-11-25 back to 2024-11-05. It detects which on first use;
+  `protocol_version=` pins one. The deprecated HTTP+SSE transport is not
+  supported.
+- **Results.** `call_tool` returns an `McpToolResult` — `content`,
+  `structured_content`, `is_error`, plus `text`, `ok` and `to_dict()`. A tool
+  that ran and failed is an answer, not an exception; pass `check=True` to
+  raise instead. A server that refuses a request raises `JsonRpcError`, an
+  `IntegrationError` carrying the JSON-RPC `code`.
+- **Connections.** The connection opens on first use, and a stdio server that
+  exits is started again on the next call. A request that was in flight when
+  it died raises rather than being retried, since a tool call may already have
+  had its effect. `timeout` bounds each request and `max_bytes` each message.
+- **What titoos does not do.** It declares no client capabilities, so it
+  answers a server's `ping` and refuses anything else a server asks of it —
+  sampling, elicitation, roots. Over HTTP, a 2026-07-28 server's tools whose
+  `x-mcp-header` annotations are invalid are left out of `list_tools`, as the
+  specification requires.
+
+### A2A agents
+
+`A2AIntegration` lets agents message remote agents over
+[Agent2Agent (A2A)](https://a2a-protocol.org), from an address book the
+operator fixes when installing it:
+
+```python
+from titoos import A2AIntegration, A2APeer, Kernel
+
+kernel = Kernel()
+kernel.install(
+    A2AIntegration(
+        {
+            "translator": "https://agents.example.com/translator",
+            "billing": A2APeer("https://billing.example.com", headers={"Authorization": "Bearer ..."}),
+        }
+    )
+)
+
+def clerk(ctx):
+    answer = ctx.call("a2a", "send_message", "translator", "Translate to French: good morning")
+    if answer.needs_input:                      # the task asked a question back
+        answer = ctx.call(
+            "a2a", "send_message", "translator", "formal, please",
+            task_id=answer.task_id, context_id=answer.context_id,
+        )
+    print(answer.state, answer.text)
+    ctx.exit()
+```
+
+- **Discovery.** Each peer's agent card is read on first use from
+  `{url}/.well-known/agent-card.json`, or from `url` itself when it names a
+  `.json` file. The client speaks the JSON-RPC binding of A2A 1.0 and 0.3,
+  choosing what the card offers (1.0 first); `A2APeer(protocol_version=...)`
+  pins one. gRPC, HTTP+JSON, streaming and push notifications are not used.
+- **Messages.** `send_message` takes `text`, `data=` (a JSON value) and
+  `parts=` (strings, bytes, or part mappings such as `{"url": ...,
+  "mediaType": ...}`), plus `context_id=`, `task_id=` and `metadata=`. It
+  returns an `A2AResult`: `kind` (`"message"` or `"task"`), `state`, `text`,
+  `parts` (always in the 1.0 shape), `task_id`, `context_id`, and `ok`,
+  `done` and `needs_input`.
+- **Tasks.** By default `send_message` waits for a task to settle within
+  `timeout`, polling while it is `submitted` or `working`. `wait=False`
+  returns as soon as the task exists; `get_task` and `cancel_task` follow it
+  up. A failed task is an answer (`state == "failed"`); a peer that refuses a
+  request raises `JsonRpcError` with A2A's error `code`, such as `-32001` for
+  `TaskNotFoundError`.
 
 ### Writing your own
 
@@ -530,6 +645,29 @@ Adapters for real frameworks import their SDK lazily through
 extra to install. TitoOS itself stays dependency-free, and `import titoos`
 never imports the platform layer at all.
 
+### Remote A2A agents
+
+`A2AAdapter` puts a remote A2A agent on the bus under a local name, so the
+agents around it message it like any other. It needs no SDK, and is
+registered as `"a2a"`, so `create_platform("a2a", url, name=...)` builds the
+same thing from configuration:
+
+```python
+from titoos.platforms import A2AAdapter
+
+kernel.register(A2AAdapter("https://agents.example.com/translator", name="translator").agent("translator"))
+```
+
+Each turn's mail goes to the peer as one message — strings as text parts,
+bytes as raw parts, mappings as data parts — and the answer goes back to the
+sender: its text, or the whole `A2AResult.to_dict()` when it carries more than
+text, with `a2a_state`, `a2a_task_id` and `a2a_context_id` metadata. All turns
+share one A2A context, so the peer sees a single conversation; when it asks
+for more input (`a2a_state == "input_required"`), the next turn answers that
+task. Both survive snapshots. A task that fails, is rejected or canceled,
+needs authentication, or is still running after `timeout` raises
+`PlatformError`, and supervision takes it from there.
+
 ## GUI
 
 `titoos.gui` is a browser dashboard for a kernel, served by the standard
@@ -600,6 +738,13 @@ Things to know:
 | `CudaUnavailableError: no CUDA device is available` | Neither PyTorch nor CuPy is installed with GPU support, or no GPU or driver is visible; the message gives the reason per library. Catch it and fall back to another backend. |
 | `Expected all tensors to be on the same device` | An agent used a tensor or model that lives on another agent's GPU — or was created at import time, on device 0. Create GPU state inside `step()`, move tensors that arrive in messages with `.to("cuda")`, or pin the agents to one device with `cuda_device`. |
 | Every agent on one GPU failed in the same tick | Waiting for that device raised: an asynchronous CUDA error from work queued during the tick, which cannot be traced to one agent. The error is in `kernel.errors`. |
+| The first call to a stdio MCP server takes `timeout` seconds | The server ignored the 2026-07-28 `server/discover` probe instead of answering it with an error, so titoos waited it out before falling back to `initialize`. Pin the revision it speaks, e.g. `McpIntegration(..., protocol_version="2025-11-25")`. |
+| `MCP server 'x' rejected initialize with HTTP 404` (or `405`) | `url=` is not a Streamable HTTP endpoint — often the server only speaks the deprecated HTTP+SSE transport, which titoos does not support. Point `url=` at its Streamable HTTP endpoint (commonly `/mcp`), or run it with `command=`. |
+| `tool 'x' was excluded: ...` | The server annotated that tool's arguments with an invalid `x-mcp-header`, so the tool is left out of `list_tools`; the reason names the problem in the server's schema. |
+| `... redirect to ... not followed` / `redirects are not followed` | MCP and A2A never follow redirects, so credentials cannot leak to another server. Configure the final URL. |
+| `the agent card only offers ... at another origin (...)` | The peer's card points requests at another host, and titoos will not send the peer's `headers` there on the card's say-so. If you trust that host, pass it as `A2APeer(url, endpoint=...)`. |
+| `... if the agent speaks A2A 0.3, pass A2APeer(protocol_version='0.3')` | With `endpoint=` there is no card to read the version from, so titoos assumed A2A 1.0 and the peer refused it. Add `protocol_version="0.3"` for a 0.3 agent. |
+| `PlatformError: A2A peer 'x' is still running task ...` | The remote task outlasted the adapter's `timeout`; raise it with `A2AAdapter(..., timeout=...)`. |
 
 ## Layout
 
@@ -611,8 +756,8 @@ Things to know:
 | `titoos/backends.py` | `SerialBackend`, `ThreadBackend`, `AsyncBackend`. |
 | `titoos/cuda.py` | `CudaBackend`: device placement and the tick barrier on the GPU. |
 | `titoos/persistence.py` | `Snapshot` and the records it serializes. |
-| `titoos/integrations/` | HTTP, filesystem, shell and clock drivers. |
-| `titoos/platforms/` | `PlatformAdapter` and the platform registry. |
+| `titoos/integrations/` | HTTP, filesystem, shell, clock, MCP and A2A drivers, and the JSON-RPC plumbing MCP and A2A share. |
+| `titoos/platforms/` | `PlatformAdapter`, the platform registry and `A2AAdapter`. |
 | `titoos/gui/` | `KernelGUI`: the browser dashboard and its JSON API. |
 | `tests/` | Pytest suite, one module per area. |
 

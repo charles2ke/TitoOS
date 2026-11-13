@@ -583,6 +583,8 @@ class PlatformRegistry:
 
 #: The registry adapters are published in, including out-of-tree ones.
 registry = PlatformRegistry()
+# Built-in adapters, published by import path so registering imports nothing.
+registry.register("a2a", "titoos.platforms.a2a:A2AAdapter")
 
 
 def register_platform(
