@@ -2,6 +2,7 @@ import contextlib
 import subprocess
 import sys
 import threading
+import weakref
 
 import pytest
 
@@ -150,6 +151,54 @@ def test_agents_that_are_gone_give_their_device_back():
     assert replacement.seen == [(0, [])]
     assert kernel.get("new").seen == [(0, [])]
     assert [d["agents"] for d in backend.describe()["devices"]] == [[], ["stays"]]
+
+
+@pytest.mark.parametrize("keep_waiting_agent", [False, True])
+def test_empty_ticks_release_unregistered_agents(keep_waiting_agent):
+    driver = FakeDriver(2)
+    kernel = make_kernel(driver)
+    backend = kernel.backend
+    removed = kernel.register(Recorder("removed", driver))
+    reference = weakref.ref(removed)
+    if keep_waiting_agent:
+        kernel.register(Recorder("waiting", driver))
+    kernel.step()
+    kernel.unregister("removed")
+    del removed
+
+    report = kernel.step()
+
+    assert report.ran == ()
+    assert backend.device_of("removed") is None
+    assert reference() is None
+    assert [d["agents"] for d in backend.describe()["devices"]] == [
+        [], ["waiting"] if keep_waiting_agent else []
+    ]
+    if keep_waiting_agent:
+        assert backend.device_of("waiting") == 1
+
+
+@pytest.mark.parametrize("max_workers", [1, 2])
+@pytest.mark.parametrize("wait", [False, True])
+def test_shutdown_releases_agent_references(max_workers, wait):
+    driver = FakeDriver(2)
+    kernel = make_kernel(driver, max_workers=max_workers)
+    backend = kernel.backend
+    removed = kernel.register(Recorder("removed", driver))
+    reference = weakref.ref(removed)
+    kernel.register(Recorder("waiting", driver))
+    kernel.step()
+    kernel.unregister("removed")
+    del removed
+
+    backend.shutdown(wait=wait)
+
+    assert backend._pool is None
+    assert reference() is None
+    assert backend.device_of("removed") is None
+    assert backend.device_of("waiting") is None
+    assert [d["agents"] for d in backend.describe()["devices"]] == [[], []]
+    backend.shutdown(wait=wait)
 
 
 def test_gpu_work_finishes_before_the_next_tick():

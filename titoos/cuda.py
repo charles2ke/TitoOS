@@ -336,14 +336,12 @@ class CudaBackend(ExecutionBackend):
         rejected: list[tuple[Agent, ValueError]] = []
         with self._lock:
             placement = self._placement
-            load: Counter[int] | None = None
+            load = self._release(kernel)
             for agent in agents:
                 entry = placement.get(agent.name)
                 if entry is not None and entry[0] is agent:
                     devices.append(entry[1])
                     continue
-                if load is None:
-                    load = self._release(kernel)
                 try:
                     device = self._choose(agent, load)
                 except ValueError as exc:
@@ -360,9 +358,8 @@ class CudaBackend(ExecutionBackend):
     def _release(self, kernel: Kernel) -> Counter[int]:
         """Forget agents that are gone and count the rest per device.
 
-        Called with the lock held, and only when an agent needs a device:
-        placing is rare, so it is also when finished, failed, unregistered or
-        replaced agents give their device back.
+        Called with the lock held at every tick barrier, even when no agent
+        needs a device. Waiting and restarted agents keep their placements.
         """
         current = {agent.name: agent for agent in kernel.live_agents()}
         placement = self._placement
@@ -430,5 +427,9 @@ class CudaBackend(ExecutionBackend):
 
     def shutdown(self, wait: bool = True) -> None:
         pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=wait)
+        try:
+            if pool is not None:
+                pool.shutdown(wait=wait)
+        finally:
+            with self._lock:
+                self._placement.clear()
