@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict, deque
 from typing import Any, Iterable, Sequence
 
-from .message import BROADCAST, Message
+from .message import BROADCAST, Message, _make_message
 
 
 class MessageBus:
@@ -31,22 +31,25 @@ class MessageBus:
 
     def send(self, message: Message) -> None:
         """Deliver ``message`` to its recipient, or to everyone if broadcast."""
+        to = message.to
         with self._lock:
-            if message.is_broadcast:
+            if to == BROADCAST:
+                sender = message.sender
                 for name, mailbox in self._mailboxes.items():
-                    if name != message.sender:
+                    if name != sender:
                         mailbox.append(message)
                 return
-            if message.to not in self._mailboxes:
+            mailbox = self._mailboxes.get(to)
+            if mailbox is None:
                 known = ", ".join(sorted(self._mailboxes)) or "none"
                 raise KeyError(
-                    f"unknown recipient: {message.to!r}; mailboxes: {known}"
+                    f"unknown recipient: {to!r}; mailboxes: {known}"
                 )
-            self._mailboxes[message.to].append(message)
+            mailbox.append(message)
 
     def post(self, sender: str, to: str, payload: Any = None, **metadata: Any) -> Message:
         """Build and send a message in one call."""
-        message = Message(sender=sender, to=to, payload=payload, metadata=dict(metadata))
+        message = _make_message(sender, to, payload, metadata)
         self.send(message)
         return message
 
@@ -75,20 +78,26 @@ class MessageBus:
         boundary.
         """
         with self._lock:
+            get = self._mailboxes.get
             drained: list[list[Message]] = []
+            append = drained.append
             for name in names:
-                mailbox = self._mailboxes.get(name)
-                if not mailbox:
-                    drained.append([])
-                    continue
-                drained.append(list(mailbox))
-                mailbox.clear()
+                mailbox = get(name)
+                if mailbox:
+                    append(list(mailbox))
+                    mailbox.clear()
+                else:
+                    append([])
             return drained
 
     def any_pending(self, names: Iterable[str]) -> bool:
         """True if at least one of ``names`` has a pending message."""
         with self._lock:
-            return any(self._mailboxes.get(name) for name in names)
+            get = self._mailboxes.get
+            for name in names:
+                if get(name):
+                    return True
+            return False
 
     def mailboxes(self) -> Iterable[str]:
         with self._lock:

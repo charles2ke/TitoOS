@@ -32,6 +32,11 @@ class AgentState(str, Enum):
     FAILED = "failed"
 
 
+#: States in which an agent may still run. A tuple rather than a set: the
+#: membership test then succeeds on identity without hashing the enum member.
+_LIVE_STATES = (AgentState.READY, AgentState.RUNNING, AgentState.WAITING)
+
+
 @dataclass
 class Context:
     """Everything an agent needs during a single scheduling tick."""
@@ -123,11 +128,7 @@ class Agent:
     @property
     def is_alive(self) -> bool:
         """True while the agent may still run; waiting agents are alive."""
-        return self.state in (
-            AgentState.READY,
-            AgentState.RUNNING,
-            AgentState.WAITING,
-        )
+        return self.state in _LIVE_STATES
 
     def step(self, ctx: Context) -> None:
         """Perform one unit of work. Subclasses must override this.

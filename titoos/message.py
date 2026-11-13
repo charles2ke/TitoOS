@@ -54,3 +54,29 @@ class Message:
             payload=data.get("payload"),
             metadata=data.get("metadata") or {},
         )
+
+
+_new_object = object.__new__
+
+
+def _make_message(
+    sender: str, to: str, payload: Any, metadata: Mapping[str, Any]
+) -> Message:
+    """Build a :class:`Message` exactly as ``Message(...)`` would, faster.
+
+    The bus creates one message per send, and the frozen dataclass
+    ``__init__`` writes each field through ``object.__setattr__``, which makes
+    construction several times slower than filling the instance dict directly.
+    The result is indistinguishable: same fields and the same metadata
+    normalisation as ``__post_init__``, so equality, repr, copying and
+    ``dataclasses.replace`` behave the same.
+    """
+    message = _new_object(Message)
+    fields = message.__dict__
+    fields["sender"] = sender
+    fields["to"] = to
+    fields["payload"] = payload
+    fields["metadata"] = (
+        MappingProxyType(dict(metadata)) if metadata else _EMPTY_METADATA
+    )
+    return message
