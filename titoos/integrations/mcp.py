@@ -311,9 +311,11 @@ class _StdioTransport:
         request_id = message["id"]
         pending = _Pending()
         with self._lock:
-            if self._failure is not None:
-                raise _TransportError(self._failure + self._stderr_hint())
-            self._pending[request_id] = pending
+            failure = self._failure
+            if failure is None:
+                self._pending[request_id] = pending
+        if failure is not None:
+            raise _TransportError(failure + self._stderr_hint())
         try:
             self._write(message)
             if not pending.event.wait(max(deadline - time.monotonic(), 0.0)):
